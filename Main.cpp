@@ -36,6 +36,36 @@ static const TCHAR* _app_name = _T("pxtone-play-sample");
 #define _SAMPLE_PER_SECOND 44100
 #define _BUFFER_PER_SEC    (0.3f)
 
+
+// I/O..
+static bool _pxtn_r( void* user,      void* p_dst, int size, int num )
+{
+	int i = fread( p_dst, size, num, (FILE*)user );
+	if( i < num ) return false;
+	return true;
+}
+
+static bool _pxtn_w( void* user,const void* p_dst, int size, int num )
+{
+	int i = fwrite( p_dst, size, num, (FILE*)user );
+	if( i < num ) return false;
+	return true;
+}
+
+static bool _pxtn_s( void* user, int mode, int size )
+{
+	if( fseek( (FILE*)user, size, mode ) ) return false;
+	return true;
+}
+
+static bool _pxtn_p( void* user, int32_t* p_pos )
+{
+	int i = ftell( (FILE*)user );
+	if( i < 0 ) return false;
+	*p_pos = i;
+	return true;
+}
+
 static bool _SelFile_OpenLoad( HWND hwnd, TCHAR *path_get, const TCHAR *path_def_dir, const TCHAR *title, const TCHAR *ext, const TCHAR *filter )
 {
 	OPENFILENAME ofn = {0};
@@ -61,16 +91,16 @@ static bool _SelFile_OpenLoad( HWND hwnd, TCHAR *path_get, const TCHAR *path_def
 static bool _load_ptcop( pxtnService* pxtn, const TCHAR* path_src, pxtnERR* p_pxtn_err )
 {
 	bool           b_ret     = false;
-	pxtnDescriptor desc;
+//	pxtnDescriptor desc;
 	pxtnERR        pxtn_err  = pxtnERR_VOID;
 	FILE*          fp        = NULL;
 	int32_t        event_num =    0;
 
 	if( !( fp = _tfopen( path_src, _T("rb") ) ) ) goto term;
-	if( !desc.set_file_r( fp ) ) goto term;
+//	if( !desc.set_file_r( fp ) ) goto term;
 
-	pxtn_err = pxtn->read       ( &desc ); if( pxtn_err != pxtnOK ) goto term;
-	pxtn_err = pxtn->tones_ready(       ); if( pxtn_err != pxtnOK ) goto term;
+	pxtn_err = pxtn->read       ( fp ); if( pxtn_err != pxtnOK ) goto term;
+	pxtn_err = pxtn->tones_ready(    ); if( pxtn_err != pxtnOK ) goto term;
 
 	b_ret = true;
 term:
@@ -139,7 +169,9 @@ int WINAPI WinMain( HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nCmd )
 		_T("All files {*.*}\0*.*\0\0"      );
 
 	// INIT PXTONE.
-	pxtn = new pxtnService();
+//	pxtn = new pxtnService();
+	pxtn = new pxtnService( _pxtn_r, _pxtn_w, _pxtn_s, _pxtn_p );
+
 	pxtn_err = pxtn->init(); if( pxtn_err != pxtnOK ) goto term;
 	if( !pxtn->set_destination_quality( _CHANNEL_NUM, _SAMPLE_PER_SECOND ) ) goto term;
 

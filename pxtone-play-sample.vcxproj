@@ -70,7 +70,7 @@
     <ClCompile Include="Main.cpp" />
     <ClCompile Include="SimpleXAudio2.cpp" />
     <ClCompile Include="pxtone\pxtnDelay.cpp" />
-    <ClCompile Include="pxtone\pxtnDescriptor.cpp" />
+    <ClCompile Include="pxtone\pxtnData.cpp" />
     <ClCompile Include="pxtone\pxtnError.cpp" />
     <ClCompile Include="pxtone\pxtnEvelist.cpp" />
     <ClCompile Include="pxtone\pxtnMaster.cpp" />
@@ -95,7 +95,7 @@
     <ClInclude Include="project01\SimpleXAudio2.h" />
     <ClInclude Include="pxtone\pxtn.h" />
     <ClInclude Include="pxtone\pxtnDelay.h" />
-    <ClInclude Include="pxtone\pxtnDescriptor.h" />
+    <ClInclude Include="pxtone\pxtnData.h" />
     <ClInclude Include="pxtone\pxtnError.h" />
     <ClInclude Include="pxtone\pxtnEvelist.h" />
     <ClInclude Include="pxtone\pxtnMaster.h" />

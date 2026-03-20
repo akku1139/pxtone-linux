@@ -9,7 +9,7 @@
     <ClCompile Include="pxtone\pxtnDelay.cpp">
       <Filter>pxtone</Filter>
     </ClCompile>
-    <ClCompile Include="pxtone\pxtnDescriptor.cpp">
+    <ClCompile Include="pxtone\pxtnData.cpp">
       <Filter>pxtone</Filter>
     </ClCompile>
     <ClCompile Include="pxtone\pxtnEvelist.cpp">
@@ -79,7 +79,7 @@
     <ClInclude Include="pxtone\pxtnDelay.h">
       <Filter>pxtone</Filter>
     </ClInclude>
-    <ClInclude Include="pxtone\pxtnDescriptor.h">
+    <ClInclude Include="pxtone\pxtnData.h">
       <Filter>pxtone</Filter>
     </ClInclude>
     <ClInclude Include="pxtone\pxtnEvelist.h">
