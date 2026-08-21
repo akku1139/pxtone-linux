@@ -55,6 +55,7 @@ struct Editor
 	// view
 	double  px_per_clock = 80.0 / _BEAT_CLOCK;
 	double  h_offset     = 0;   // px
+	double  v_offset     = 0;   // px
 	int     snap         = 240; // clocks (8th note)
 
 	// edit drag
@@ -107,6 +108,34 @@ static double _sec_per_clock()
 static int32_t _snap_clock( int32_t clock )
 {
 	return ( clock / g_ed.snap ) * g_ed.snap;
+}
+
+static void Record_Value_Set_safe( pxtnEvelist* ev, int32_t clock, int unit, int32_t dur )
+{
+	if( dur < 1 ) dur = 1;
+	ev->Record_Value_Set( clock, clock + 1, (uint8_t)unit, EVENTKIND_ON, dur );
+}
+
+// After changing an ON event's length, resolve overlaps like Record_Add_i does:
+// shorten the previous note ending inside ours, delete notes starting inside ours.
+static void _fix_overlaps( int32_t clock, int unit, int32_t dur )
+{
+	pxtnEvelist* ev = g_ed.pxtn->evels;
+
+	std::vector<int32_t> inside;
+	int32_t prev_clock = -1;
+
+	for( const EVERECORD* p = ev->get_Records(); p; p = p->next )
+	{
+		if( p->kind != EVENTKIND_ON || p->unit_no != unit || p->clock == clock ) continue;
+		if( p->clock < clock && p->clock + p->value > clock ) prev_clock = p->clock; // overlaps our start
+		if( p->clock > clock && p->clock < clock + dur ) inside.push_back( p->clock );    // starts inside our span
+	}
+
+	if( prev_clock >= 0 )
+		Record_Value_Set_safe( ev, prev_clock, unit, clock - prev_clock );
+	for( int32_t c : inside )
+		ev->Record_Delete( c, c + 1, (uint8_t)unit, EVENTKIND_ON );
 }
 
 static void _unit_color( int unit, double* r, double* g, double* b )
@@ -179,7 +208,7 @@ static void _stop_play()
 static bool _screen_to_clock_row( int x, int y, int* p_clock, int* p_row )
 {
 	int32_t clock = (int32_t)( ( g_ed.h_offset + x ) / g_ed.px_per_clock );
-	int row = _ROW_MAX - (int)floor( y / (double)_ROW_H );
+	int row = _ROW_MAX - (int)floor( ( y + g_ed.v_offset ) / (double)_ROW_H );
 	if( row < _ROW_MIN || row > _ROW_MAX ) return false;
 	if( clock < 0 ) return false;
 	*p_clock = clock; *p_row = row;
@@ -216,18 +245,20 @@ static void _add_note( int32_t clock, int row )
 
 static void _drag_update( int x )
 {
+	pxtnEvelist* ev = g_ed.pxtn->evels;
+	int32_t c = _snap_clock( (int32_t)( ( g_ed.h_offset + x ) / g_ed.px_per_clock ) );
+	int32_t max = ev->get_Max_Clock() + g_ed.snap * 64;
+
 	if( g_ed.resizing )
 	{
 		// resize: dragging left/right on an existing note changes its length
-		int32_t c = _snap_clock( (int32_t)( ( g_ed.h_offset + x ) / g_ed.px_per_clock ) );
 		int32_t dur = c - g_ed.resize_clock;
-		int32_t max = g_ed.pxtn->evels->get_Max_Clock() + g_ed.snap * 64;
 		if( dur < g_ed.snap ) dur = g_ed.snap;
 		if( dur > max ) dur = max;
 
 		SDL_LockAudio();
-		// Record_Value_Set matches clock1 <= c < clock2, so pass a +1 range
-		g_ed.pxtn->evels->Record_Value_Set( g_ed.resize_clock, g_ed.resize_clock + 1, (uint8_t)g_ed.resize_unit, EVENTKIND_ON, dur );
+		Record_Value_Set_safe( ev, g_ed.resize_clock, g_ed.resize_unit, dur );
+		_fix_overlaps( g_ed.resize_clock, g_ed.resize_unit, dur );
 		SDL_UnlockAudio();
 
 		gtk_widget_queue_draw( g_ed.draw_area );
@@ -235,14 +266,15 @@ static void _drag_update( int x )
 	}
 
 	if( !g_ed.dragging ) return;
-	int32_t c = _snap_clock( (int32_t)( ( g_ed.h_offset + x ) / g_ed.px_per_clock ) );
+
+	// stretch the note created at drag start
 	int32_t dur = c - g_ed.drag_clock;
-	int32_t max = g_ed.pxtn->evels->get_Max_Clock() + g_ed.snap * 64;
 	if( dur < g_ed.snap ) dur = g_ed.snap;
 	if( dur > max ) dur = max;
 
 	SDL_LockAudio();
-	g_ed.pxtn->evels->Record_Value_Set( g_ed.drag_clock, g_ed.drag_clock, (uint8_t)g_ed.drag_unit, EVENTKIND_ON, dur );
+	Record_Value_Set_safe( ev, g_ed.drag_clock, g_ed.drag_unit, dur );
+	_fix_overlaps( g_ed.drag_clock, g_ed.drag_unit, dur );
 	SDL_UnlockAudio();
 
 	gtk_widget_queue_draw( g_ed.draw_area );
@@ -581,11 +613,12 @@ static void _draw_cb( GtkDrawingArea*, cairo_t* cr, int w, int h, gpointer )
 	const int rows = _ROW_MAX - _ROW_MIN + 1;
 	const double content_h = rows * _ROW_H;
 
-	// key rows (black stripes) + octave lines
+	// key rows (black stripes) + octave lines (offset by vertical scroll)
 	for( int r = _ROW_MIN; r <= _ROW_MAX; r++ )
 	{
 		static const bool black[12] = { false, true, false, true, false, false, true, false, true, false, true, false };
-		double y = ( _ROW_MAX - r ) * _ROW_H;
+		double y = ( _ROW_MAX - r ) * _ROW_H - g_ed.v_offset;
+		if( y + _ROW_H < 0 || y > h ) continue;
 		if( black[ ((r % 12) + 12) % 12 ] )
 		{
 			cairo_set_source_rgb( cr, 0.10, 0.10, 0.14 );
@@ -629,7 +662,8 @@ static void _draw_cb( GtkDrawingArea*, cairo_t* cr, int w, int h, gpointer )
 		int row = g_ed.pxtn->evels->get_Value( p->clock, p->unit_no, EVENTKIND_KEY ) >> 8;
 		if( row < _ROW_MIN ) row = _ROW_MIN;
 		if( row > _ROW_MAX ) row = _ROW_MAX;
-		double y = ( _ROW_MAX - row ) * _ROW_H;
+		double y = ( _ROW_MAX - row ) * _ROW_H - g_ed.v_offset;
+		if( y + _ROW_H < 0 || y > h ) continue;
 
 		double r, g, b;
 		_unit_color( p->unit_no, &r, &g, &b );
@@ -729,9 +763,15 @@ static gboolean _on_scroll( GtkEventControllerScroll*, double dx, double dy, gpo
 	}
 	else
 	{
-		g_ed.h_offset += ( dx - dy ) * 40;
+		g_ed.v_offset += dy * 40; // plain wheel: vertical scroll
 	}
 	if( g_ed.h_offset < 0 ) g_ed.h_offset = 0;
+	if( g_ed.v_offset < 0 ) g_ed.v_offset = 0;
+	{   // clamp to content height
+		double max_v = ( _ROW_MAX - _ROW_MIN + 1 ) * (double)_ROW_H - 100;
+		if( max_v < 0 ) max_v = 0;
+		if( g_ed.v_offset > max_v ) g_ed.v_offset = max_v;
+	}
 	gtk_widget_queue_draw( g_ed.draw_area );
 	return TRUE;
 }
