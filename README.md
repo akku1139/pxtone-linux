@@ -2,12 +2,19 @@
 
 pxtoneの非公式なLinux移植です。オリジナルは [pxtone-play-sample (Windows / XAudio2)](https://github.com/akku1139/pxtone-source-code) 。
 
+## 構成
+
+- `libpxtn.so` — pxtoneコア(共有ライブラリ)。各アプリから共有される
+- `pxtone-play` — CUI再生プレイヤー(ループ再生、Ctrl-Cで停止)
+- `pxtone-visualizer` — GUIアプリ。ピアノロール風にノーツを流しながら再生(SDL2)
+
 ## 変更点
 
 - `Main.cpp` / `SimpleXAudio2.*` (Win32 + XAudio2) を、SDL2オーディオ + コマンドライン引数の `src/main.cpp` に置き換え
 - ファイル選択ダイアログ → 引数でパス指定、MessageBox → 標準出力
 - `pxtone/` ライブラリ本体はほぼそのまま(OGG Vorbis対応 `pxINCLUDE_OGGVORBIS` を有効化、`pxtnPulse_Oggv.cpp` のgoto跨ぎ初期化を1箇所修正)
 - ビルドはCMake(libvorbis, libogg, SDL2 を使用)
+- コア部分は共有ライブラリ `libpxtn.so` として各アプリからリンク(rpath `$ORIGIN`)
 
 ## ビルド
 
@@ -25,7 +32,15 @@ cmake --build build
 
 ループ再生されます。停止は Ctrl-C。
 
-音声デバイスが無い環境では `SDL_AUDIODRIVER=dummy` を付けると動作確認できます。
+## GUIビジュアライザ
+
+```sh
+./build/pxtone-visualizer <file.ptcop|file.pttune>
+```
+
+ピアノロール風にノートが流れるGUIで再生します。ユニット毎にレーン分け・色分けされ、再生位置(白線)を過ぎたノートは暗く表示されます。ESC / ウィンドウを閉じる / Ctrl-C で停止。
+
+音声デバイスが無い環境では `SDL_AUDIODRIVER=dummy`(GUI確認は `SDL_VIDEODRIVER=dummy` も)を付けると動作確認できます。
 
 ## 謝辞
 
