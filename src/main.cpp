@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <csignal>
 #include <string>
 
 #include <SDL.h>
@@ -57,6 +58,14 @@ static bool _sampling_func( void* user, void* buf, int* p_res_size, int* p_req_s
 	if( p_res_size ) *p_res_size = *p_req_size;
 
 	return true;
+}
+
+// SDL converts SIGINT to an SDL_QUIT event, so handle it ourselves.
+static volatile sig_atomic_t _b_quit = 0;
+
+static void _sigint_handler( int )
+{
+	_b_quit = 1;
 }
 
 static void _sdl_audio_callback( void* userdata, Uint8* stream, int len )
@@ -150,10 +159,12 @@ int main( int argc, char** argv )
 		printf( "file: %s\nname: %s\n", path_src, name );
 		printf( "playing... press Ctrl-C to stop\n" );
 
-		// START PLAYING. (loops forever; stop with SIGINT)
+		// START PLAYING. (loops; stop with Ctrl-C)
+		signal( SIGINT, _sigint_handler );
 		SDL_PauseAudio( 0 );
-		for( ;; ) SDL_Delay( 100 );
+		while( !_b_quit ) SDL_Delay( 100 );
 
+		printf( "stopping...\n" );
 		b_ret = true;
 	}
 
