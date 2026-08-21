@@ -337,7 +337,8 @@ static void _preview_note( int unit, int row )
 		out[ i ] = (int16_t)( s * 32767 );
 	}
 	SDL_ClearQueuedAudio( g_ed.preview_dev );
-	SDL_QueueAudio( g_ed.preview_dev, out.data(), out.size() * sizeof( int16_t ) );
+	if( SDL_QueueAudio( g_ed.preview_dev, out.data(), out.size() * sizeof( int16_t ) ) != 0 )
+		_set_status( "preview queue error: %s", SDL_GetError() );
 }
 
 // ---- track (unit) add ---------------------------------------------------
@@ -676,9 +677,11 @@ static void _on_click( GtkGestureClick* gesture, int n_press, double x, double y
 				g_ed.resizing     = true;
 				g_ed.resize_clock = hit->clock;
 				g_ed.resize_unit  = unit;
+				_set_status( "resize: unit=%d clock=%d cur_len=%d", unit, hit->clock, hit->value );
 			}
 			else
 			{
+				_set_status( "new note: unit=%d clock=%d row=0x%02x", unit, _snap_clock( clock ), row );
 				_add_note( clock, row );
 			}
 		}
@@ -920,6 +923,7 @@ int main( int argc, char** argv )
 	pv.callback = NULL;
 	pv.userdata = NULL;
 	g_ed.preview_dev = SDL_OpenAudioDevice( NULL, 0, &pv, NULL, 0 );
+	if( g_ed.preview_dev ) SDL_PauseAudioDevice( g_ed.preview_dev, 0 ); // devices open PAUSED
 
 	GtkApplication* app = gtk_application_new( "com.github.pxtone.editor", G_APPLICATION_NON_UNIQUE );
 	g_signal_connect( app, "activate", G_CALLBACK( _activate ), NULL );
