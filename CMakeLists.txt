@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.10)
 project(pxtone-linux CXX)
+set(CMAKE_BUILD_RPATH "$ORIGIN")
+set(CMAKE_INSTALL_RPATH "$ORIGIN")
 
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -8,7 +10,8 @@ add_compile_definitions(pxINCLUDE_OGGVORBIS px64BIT)
 
 find_package(SDL2 REQUIRED)
 
-add_library(pxtn STATIC
+# Core library shared between the CLI player and GUI apps.
+add_library(pxtn SHARED
     pxtone/pxtnData.cpp
     pxtone/pxtnDelay.cpp
     pxtone/pxtnError.cpp
@@ -31,8 +34,13 @@ add_library(pxtn STATIC
     pxtone/pxtnWoice_io.cpp
     pxtone/pxtoneNoise.cpp
 )
+set_target_properties(pxtn PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(pxtn PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/pxtone)
 target_link_libraries(pxtn PUBLIC vorbisfile)
 
 add_executable(pxtone-play src/main.cpp)
 target_link_libraries(pxtone-play PRIVATE pxtn SDL2::SDL2 m pthread)
+
+# --- GUI: piano-roll style note visualizer -------------------------------
+add_executable(pxtone-visualizer src/visualizer.cpp)
+target_link_libraries(pxtone-visualizer PRIVATE pxtn SDL2::SDL2 m pthread)
