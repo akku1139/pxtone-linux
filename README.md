@@ -7,6 +7,19 @@ pxtoneの非公式なLinux移植です。オリジナルは [pxtone-play-sample 
 - `libpxtn.so` — pxtoneコア(共有ライブラリ)。各アプリから共有される
 - `pxtone-play` — CUI再生プレイヤー(ループ再生、Ctrl-Cで停止)
 - `pxtone-visualizer` — GUIアプリ。ピアノロール風にノーツを流しながら再生(SDL2)
+- `pxtone-editor` — GUIピアノロールエディタ(GTK4)。ノート編集+保存対応
+
+## pxtone-editor (GTK4)
+
+```sh
+./build/pxtone-editor <file.ptcop>
+```
+
+- 左クリック/ドラッグ : ノート追加(スナップ)+長さ変更
+- 右クリック : ノート削除
+- ホイール / Shift+ホイール / Ctrl+ホイール : 縦スクロール / 横スクロール / ズーム
+- Space : 再生/停止、Ctrl+S : 上書き保存(.ptcop)
+- キー 1-4 : スナップ(4分/8分/16分/32分)、ヘッダのドロップダウンでユニット選択
 
 ## 変更点
 

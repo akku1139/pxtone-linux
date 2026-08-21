@@ -41,6 +41,18 @@ target_link_libraries(pxtn PUBLIC vorbisfile)
 add_executable(pxtone-play src/main.cpp)
 target_link_libraries(pxtone-play PRIVATE pxtn SDL2::SDL2 m pthread)
 
+# --- GUI: GTK4 piano-roll editor ------------------------------------------
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(GTK4 REQUIRED gtk4)
+
+add_executable(pxtone-editor src/editor.cpp)
+target_include_directories(pxtone-editor PRIVATE ${GTK4_INCLUDE_DIRS})
+target_link_libraries(pxtone-editor PRIVATE pxtn SDL2::SDL2 ${GTK4_LIBRARIES} m pthread)
+
+# --- edit-logic smoke test (no GUI) ----------------------------------------
+add_executable(edit_smoke tests/edit_smoke.cpp)
+target_link_libraries(edit_smoke PRIVATE pxtn pthread)
+
 # --- GUI: piano-roll style note visualizer -------------------------------
 add_executable(pxtone-visualizer src/visualizer.cpp)
 target_link_libraries(pxtone-visualizer PRIVATE pxtn SDL2::SDL2 m pthread)
