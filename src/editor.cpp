@@ -658,46 +658,57 @@ static void _draw_cb( GtkDrawingArea*, cairo_t* cr, int w, int h, gpointer )
 
 // ---- events -------------------------------------------------------------
 
-static void _on_click( GtkGestureClick* gesture, int n_press, double x, double y, gpointer )
+// right-button press/drag: delete the note under the cursor (continuously)
+static void _on_rdrag_begin( GtkGestureDrag*, double x, double y, gpointer )
 {
-	guint btn = gtk_gesture_single_get_current_button( GTK_GESTURE_SINGLE( gesture ) );
+	int32_t clock; int row;
+	if( _screen_to_clock_row( (int)x, (int)y, &clock, &row ) ) _delete_note( clock, row );
+}
 
+static void _on_rdrag_update( GtkGestureDrag* gesture, double, double, gpointer )
+{
+	double x = 0, y = 0;
+	gtk_gesture_get_point( GTK_GESTURE( gesture ), NULL, &x, &y );
+	int32_t clock; int row;
+	if( _screen_to_clock_row( (int)x, (int)y, &clock, &row ) ) _delete_note( clock, row );
+}
+
+// left-button press/drag: create a new note, or resize an existing one
+static void _on_drag_begin( GtkGestureDrag*, double x, double y, gpointer )
+{
 	int32_t clock; int row;
 	if( !_screen_to_clock_row( (int)x, (int)y, &clock, &row ) ) return;
 
-	if( btn == GDK_BUTTON_PRIMARY )
+	int unit = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
+	if( unit < 0 || unit >= g_ed.unit_num ) return;
+
+	// existing note -> resize mode; empty cell -> create new note
+	const EVERECORD* hit = _find_note( clock, row, unit );
+	if( hit )
 	{
-		int unit = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
-		if( unit >= 0 && unit < g_ed.unit_num )
-		{
-			// existing note -> resize mode; empty cell -> create new note
-			const EVERECORD* hit = _find_note( clock, row, unit );
-			if( hit )
-			{
-				g_ed.resizing     = true;
-				g_ed.resize_clock = hit->clock;
-				g_ed.resize_unit  = unit;
-				_set_status( "resize: unit=%d clock=%d cur_len=%d", unit, hit->clock, hit->value );
-			}
-			else
-			{
-				_set_status( "new note: unit=%d clock=%d row=0x%02x", unit, _snap_clock( clock ), row );
-				_add_note( clock, row );
-			}
-		}
+		g_ed.resizing     = true;
+		g_ed.resize_clock = hit->clock;
+		g_ed.resize_unit  = unit;
+		_set_status( "resize: unit=%d clock=%d cur_len=%d", unit, hit->clock, hit->value );
 	}
-	else if( btn == GDK_BUTTON_SECONDARY ) _delete_note( clock, row );
+	else
+	{
+		_set_status( "new note: unit=%d clock=%d row=0x%02x", unit, _snap_clock( clock ), row );
+		_add_note( clock, row );
+	}
 }
 
-static void _on_release( GtkGestureClick*, int, double, double, gpointer )
+static void _on_drag_update( GtkGestureDrag* gesture, double, double, gpointer )
+{
+	double x = 0, y = 0;
+	gtk_gesture_get_point( GTK_GESTURE( gesture ), NULL, &x, &y );
+	_drag_update( (int)x ); // follows the mouse while the button is held
+}
+
+static void _on_drag_end( GtkGestureDrag*, double, double, gpointer )
 {
 	g_ed.dragging = false;
 	g_ed.resizing = false;
-}
-
-static void _on_motion( GtkEventControllerMotion*, double x, double, gpointer )
-{
-	if( g_ed.dragging ) _drag_update( (int)x );
 }
 
 static gboolean _on_scroll( GtkEventControllerScroll*, double dx, double dy, gpointer state )
@@ -827,16 +838,20 @@ static void _activate( GtkApplication* app, gpointer )
 	gtk_widget_set_vexpand( g_ed.draw_area, TRUE );
 	gtk_box_append( GTK_BOX( vbox ), g_ed.draw_area );
 
-	// input controllers
-	GtkGesture* click = gtk_gesture_click_new();
-	gtk_gesture_single_set_button( GTK_GESTURE_SINGLE( click ), 0 ); // all buttons
-	g_signal_connect( click, "pressed",  G_CALLBACK( _on_click ),   NULL );
-	g_signal_connect( click, "released", G_CALLBACK( _on_release ), NULL );
-	gtk_widget_add_controller( g_ed.draw_area, GTK_EVENT_CONTROLLER( click ) );
+	// right-click drag: delete notes under the cursor (continuously)
+	GtkGesture* rdrag = gtk_gesture_drag_new();
+	gtk_gesture_single_set_button( GTK_GESTURE_SINGLE( rdrag ), GDK_BUTTON_SECONDARY );
+	g_signal_connect( rdrag, "drag-begin",  G_CALLBACK( _on_rdrag_begin ),  NULL );
+	g_signal_connect( rdrag, "drag-update", G_CALLBACK( _on_rdrag_update ), NULL );
+	gtk_widget_add_controller( g_ed.draw_area, GTK_EVENT_CONTROLLER( rdrag ) );
 
-	GtkEventController* motion = gtk_event_controller_motion_new();
-	g_signal_connect( motion, "motion", G_CALLBACK( _on_motion ), NULL );
-	gtk_widget_add_controller( g_ed.draw_area, motion );
+	// left-click drag: create / resize notes (updates while button held)
+	GtkGesture* drag = gtk_gesture_drag_new();
+	gtk_gesture_single_set_button( GTK_GESTURE_SINGLE( drag ), GDK_BUTTON_PRIMARY );
+	g_signal_connect( drag, "drag-begin",  G_CALLBACK( _on_drag_begin ),  NULL );
+	g_signal_connect( drag, "drag-update", G_CALLBACK( _on_drag_update ), NULL );
+	g_signal_connect( drag, "drag-end",    G_CALLBACK( _on_drag_end ),    NULL );
+	gtk_widget_add_controller( g_ed.draw_area, GTK_EVENT_CONTROLLER( drag ) );
 
 	GtkEventController* scroll = gtk_event_controller_scroll_new(
 		(GtkEventControllerScrollFlags)( GTK_EVENT_CONTROLLER_SCROLL_BOTH_AXES | GTK_EVENT_CONTROLLER_SCROLL_DISCRETE ) );
