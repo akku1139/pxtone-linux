@@ -62,6 +62,11 @@ struct Editor
 	int32_t drag_clock = 0;
 	int32_t drag_unit  = 0;
 
+	// note resize (drag left/right on an existing note)
+	bool    resizing   = false;
+	int32_t resize_clock = 0;
+	int32_t resize_unit  = 0;
+
 	// playback
 	std::atomic<int64_t> played_samples {0};
 	std::atomic<bool>    playing        {false};
@@ -211,6 +216,23 @@ static void _add_note( int32_t clock, int row )
 
 static void _drag_update( int x )
 {
+	if( g_ed.resizing )
+	{
+		// resize: dragging left/right on an existing note changes its length
+		int32_t c = _snap_clock( (int32_t)( ( g_ed.h_offset + x ) / g_ed.px_per_clock ) );
+		int32_t dur = c - g_ed.resize_clock;
+		int32_t max = g_ed.pxtn->evels->get_Max_Clock() + g_ed.snap * 64;
+		if( dur < g_ed.snap ) dur = g_ed.snap;
+		if( dur > max ) dur = max;
+
+		SDL_LockAudio();
+		g_ed.pxtn->evels->Record_Value_Set( g_ed.resize_clock, g_ed.resize_clock, (uint8_t)g_ed.resize_unit, EVENTKIND_ON, dur );
+		SDL_UnlockAudio();
+
+		gtk_widget_queue_draw( g_ed.draw_area );
+		return;
+	}
+
 	if( !g_ed.dragging ) return;
 	int32_t c = _snap_clock( (int32_t)( ( g_ed.h_offset + x ) / g_ed.px_per_clock ) );
 	int32_t dur = c - g_ed.drag_clock;
@@ -225,13 +247,9 @@ static void _drag_update( int x )
 	gtk_widget_queue_draw( g_ed.draw_area );
 }
 
-static void _delete_note( int32_t clock, int row )
+// Find the ON event under the cursor (clock position + pitch row).
+static const EVERECORD* _find_note( int32_t clock, int row, int unit )
 {
-	int unit = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
-	if( unit < 0 || unit >= g_ed.unit_num ) return;
-
-	// find the ON event under the cursor
-	const EVERECORD* hit = NULL;
 	for( const EVERECORD* p = g_ed.pxtn->evels->get_Records(); p; p = p->next )
 	{
 		if( p->kind != EVENTKIND_ON || p->unit_no != unit ) continue;
@@ -239,11 +257,19 @@ static void _delete_note( int32_t clock, int row )
 		int32_t dur = p->value > 0 ? p->value : g_ed.snap;
 		if( clock >= p->clock && clock < p->clock + dur )
 		{
-			// check key row matches
 			int k = g_ed.pxtn->evels->get_Value( p->clock, (uint8_t)unit, EVENTKIND_KEY ) >> 8;
-			if( k == row ){ hit = p; }
+			if( k == row ) return p;
 		}
 	}
+	return NULL;
+}
+
+static void _delete_note( int32_t clock, int row )
+{
+	int unit = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
+	if( unit < 0 || unit >= g_ed.unit_num ) return;
+
+	const EVERECORD* hit = _find_note( clock, row, unit );
 	if( !hit ) return;
 
 	SDL_LockAudio();
@@ -637,13 +663,32 @@ static void _on_click( GtkGestureClick* gesture, int n_press, double x, double y
 	int32_t clock; int row;
 	if( !_screen_to_clock_row( (int)x, (int)y, &clock, &row ) ) return;
 
-	if( btn == GDK_BUTTON_PRIMARY )      _add_note( clock, row );
+	if( btn == GDK_BUTTON_PRIMARY )
+	{
+		int unit = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
+		if( unit >= 0 && unit < g_ed.unit_num )
+		{
+			// existing note -> resize mode; empty cell -> create new note
+			const EVERECORD* hit = _find_note( clock, row, unit );
+			if( hit )
+			{
+				g_ed.resizing     = true;
+				g_ed.resize_clock = hit->clock;
+				g_ed.resize_unit  = unit;
+			}
+			else
+			{
+				_add_note( clock, row );
+			}
+		}
+	}
 	else if( btn == GDK_BUTTON_SECONDARY ) _delete_note( clock, row );
 }
 
 static void _on_release( GtkGestureClick*, int, double, double, gpointer )
 {
 	g_ed.dragging = false;
+	g_ed.resizing = false;
 }
 
 static void _on_motion( GtkEventControllerMotion*, double x, double, gpointer )
@@ -750,10 +795,16 @@ static void _activate( GtkApplication* app, gpointer )
 
 	GtkWidget* btn_unit  = gtk_button_new_with_label( "+unit" );
 	GtkWidget* btn_sound = gtk_button_new_with_label( "sound..." );
+	GtkWidget* btn_play  = gtk_button_new_with_label( "▶ play" );
+	GtkWidget* btn_stop  = gtk_button_new_with_label( "■ stop" );
 	g_signal_connect_swapped( btn_unit,  "clicked", G_CALLBACK( +[]( gpointer ){ _add_unit(); } ), NULL );
 	g_signal_connect_swapped( btn_sound, "clicked", G_CALLBACK( +[]( gpointer ){ _sound_dialog(); } ), NULL );
+	g_signal_connect_swapped( btn_play,  "clicked", G_CALLBACK( +[]( gpointer ){ _start_play(); } ), NULL );
+	g_signal_connect_swapped( btn_stop,  "clicked", G_CALLBACK( +[]( gpointer ){ _stop_play(); } ), NULL );
 	gtk_box_append( GTK_BOX( hbox ), btn_unit );
 	gtk_box_append( GTK_BOX( hbox ), btn_sound );
+	gtk_box_append( GTK_BOX( hbox ), btn_play );
+	gtk_box_append( GTK_BOX( hbox ), btn_stop );
 
 	gtk_box_append( GTK_BOX( hbox ), gtk_label_new( "snap:" ) );
 	g_ed.snap_combo = gtk_drop_down_new_from_strings( (const char*[]){ "1/4", "1/8", "1/16", "1/32", NULL } );
