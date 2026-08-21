@@ -1,6 +1,6 @@
 # pxtone-linux
 
-pxtoneの非公式なLinux移植です。オリジナルは [pxtone-play-sample (Windows / XAudio2)](../pxtone-source-code) 。
+pxtoneの非公式なLinux移植です。オリジナルは [pxtone-play-sample (Windows / XAudio2)](https://github.com/akku1139/pxtone-source-code) 。
 
 ## 変更点
 
