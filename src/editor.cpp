@@ -66,6 +66,9 @@ struct Editor
 	std::atomic<int64_t> played_samples {0};
 	std::atomic<bool>    playing        {false};
 
+	// preview (note audition)
+	SDL_AudioDeviceID preview_dev = 0;
+
 	// widgets
 	GtkWidget* window    = NULL;
 	GtkWidget* draw_area = NULL;
@@ -75,6 +78,10 @@ struct Editor
 };
 
 static Editor g_ed;
+
+static const double PI = 3.141592653589793;
+
+static void _preview_note( int unit, int row ); // fwd
 
 // ---- helpers ------------------------------------------------------------
 
@@ -193,6 +200,8 @@ static void _add_note( int32_t clock, int row )
 	g_ed.pxtn->evels->Record_Add_i( c, (uint8_t)unit, EVENTKIND_ON, g_ed.snap );
 	SDL_UnlockAudio();
 
+	_preview_note( unit, row );
+
 	g_ed.dragging   = true;
 	g_ed.drag_clock = c;
 	g_ed.drag_unit  = unit;
@@ -253,6 +262,284 @@ static void _save()
 	fclose( fp );
 	if( err != pxtnOK ){ _set_status( "ERROR: %s", pxtnError_get_string( err ) ); return; }
 	_set_status( "saved: %s", g_ed.path.c_str() );
+}
+
+// ---- note preview (audition) --------------------------------------------
+
+// Render ~0.35s of the unit's woice pitched to the key row and queue it.
+static void _preview_note( int unit, int row )
+{
+	if( !g_ed.preview_dev || unit < 0 || unit >= g_ed.unit_num ) return;
+
+	const pxtnWoice* woice = g_ed.pxtn->Unit_Get( unit )->get_woice();
+	if( !woice ) return;
+
+	const double PI = 3.141592653589793;
+	const int32_t SPSEC = _SAMPLE_PER_SECOND;
+	const int dur_frames = SPSEC * 35 / 100; // 0.35s
+
+	std::vector<float> buf( dur_frames * 2, 0.0f );
+
+	for( int v = 0; v < woice->get_voice_num(); v++ )
+	{
+		const pxtnVOICEINSTANCE* vi = woice->get_instance( v );
+		const pxtnVOICEUNIT*     vc = woice->get_voice( v );
+		if( !vi->p_smp_w || vi->smp_body_w <= 0 ) continue;
+
+		double ratio = pow( 2.0, ( row - ( vc->basic_key >> 8 ) ) / 12.0 );
+		double vol   = vc->volume / 128.0;
+		const int16_t* p = (const int16_t*)vi->p_smp_w;
+
+		for( int i = 0; i < dur_frames; i++ )
+		{
+			int64_t si = (int64_t)( i * ratio ) % vi->smp_body_w;
+			double env = 1.0;
+			if( i < SPSEC * 3 / 1000 ) env = i / (double)( SPSEC * 3 / 1000 );          // 3ms attack
+			if( i > dur_frames - SPSEC / 10 ) env = ( dur_frames - i ) / (double)( SPSEC / 10 ); // 100ms release
+			buf[ i * 2 + 0 ] += p[ si * 2 + 0 ] / 32768.0f * vol * env;
+			buf[ i * 2 + 1 ] += p[ si * 2 + 1 ] / 32768.0f * vol * env;
+		}
+	}
+
+	std::vector<int16_t> out( dur_frames * 2 );
+	for( int i = 0; i < dur_frames * 2; i++ )
+	{
+		double s = buf[ i ] * 0.6;
+		if( s >  1 ) s =  1;
+		if( s < -1 ) s = -1;
+		out[ i ] = (int16_t)( s * 32767 );
+	}
+	SDL_ClearQueuedAudio( g_ed.preview_dev );
+	SDL_QueueAudio( g_ed.preview_dev, out.data(), out.size() * sizeof( int16_t ) );
+}
+
+// ---- track (unit) add ---------------------------------------------------
+
+static void _refresh_unit_combo()
+{
+	GtkStringList* list = GTK_STRING_LIST( gtk_drop_down_get_model( GTK_DROP_DOWN( g_ed.unit_combo ) ) );
+	guint n = g_list_model_get_n_items( G_LIST_MODEL( list ) );
+	gtk_string_list_splice( list, 0, n, NULL ); // remove all
+	for( int i = 0; i < g_ed.unit_num; i++ )
+	{
+		int32_t size = 0;
+		const char* name = g_ed.pxtn->Unit_Get( i )->get_name_buf( &size );
+		gtk_string_list_append( list, name && name[0] ? name : "(no name)" );
+	}
+	if( g_ed.unit_num > 0 ) gtk_drop_down_set_selected( GTK_DROP_DOWN( g_ed.unit_combo ), g_ed.unit_num - 1 );
+}
+
+static void _add_unit()
+{
+	if( !g_ed.loaded ) return;
+	if( !g_ed.pxtn->Unit_AddNew() ){ _set_status( "unit max reached" ); return; }
+	int idx = g_ed.pxtn->Unit_Num() - 1;
+
+	// assign woice 0 (create one if the tune has none)
+	if( g_ed.pxtn->Woice_Num() == 0 )
+	{
+		int w = g_ed.pxtn->Woice_AddNew();
+		g_ed.pxtn->Woice_Get_variable( w )->Voice_Allocate( 1 );
+		g_ed.pxtn->Woice_ReadyTone( w );
+	}
+	g_ed.pxtn->Unit_Get_variable( idx )->set_woice( g_ed.pxtn->Woice_Get( 0 ) );
+
+	char name[ 32 ]; snprintf( name, sizeof( name ), "unit %d", idx );
+	g_ed.pxtn->Unit_Get_variable( idx )->set_name_buf( name, strlen( name ) );
+
+	_ensure_evels_capacity();
+	_refresh_unit_combo();
+	_set_status( "added %s", name );
+}
+
+// ---- sound creation -------------------------------------------------------
+
+static void _make_wave_points( int type, pxtnPOINT* pts, int32_t* p_num )
+{
+	// coordinate-wave presets, y in [-100,100]
+	switch( type )
+	{
+	case 1: // saw
+		pts[0].x =     0; pts[0].y = -100;
+		pts[1].x =  9999; pts[1].y =  100; *p_num = 2; break;
+	case 2: // square
+		pts[0].x =    0; pts[0].y =  100;
+		pts[1].x = 4999; pts[1].y =  100;
+		pts[2].x = 5000; pts[2].y = -100;
+		pts[3].x = 9999; pts[3].y = -100; *p_num = 4; break;
+	case 3: // triangle
+		pts[0].x =    0; pts[0].y = -100;
+		pts[1].x = 4999; pts[1].y =  100;
+		pts[2].x = 9999; pts[2].y = -100; *p_num = 3; break;
+	case 4: // pulse 1/4
+		pts[0].x =    0; pts[0].y =  100;
+		pts[1].x = 2499; pts[1].y =  100;
+		pts[2].x = 2500; pts[2].y = -100;
+		pts[3].x = 9999; pts[3].y = -100; *p_num = 4; break;
+	default: // sine
+		*p_num = 32;
+		for( int i = 0; i < 32; i++ )
+		{
+			pts[ i ].x = (int)( 10000.0 * i / 32 );
+			pts[ i ].y = (int)( sin( 2.0 * PI * i / 32 ) * 100 );
+		}
+		break;
+	}
+}
+
+static void _create_sound( int type, int wave, int volume, int basic_row,
+                           int noise_type, double nfreq, double noffset, double nvol )
+{
+	int idx = g_ed.pxtn->Woice_AddNew();
+	if( idx < 0 ){ _set_status( "woice max reached" ); return; }
+
+	pxtnWoice* w = g_ed.pxtn->Woice_Get_variable( idx );
+	if( !w->Voice_Allocate( 1 ) ){ _set_status( "voice allocate failed" ); return; }
+
+	pxtnVOICEUNIT* v = w->get_voice_variable( 0 );
+	char wname[ 32 ];
+
+	if( type == 0 ) // PTV
+	{
+		v->type      = pxtnVOICE_Coodinate;
+		v->basic_key = basic_row << 8;
+		v->volume    = volume;
+		v->pan       = 64;
+		v->tuning    = 1.0f;
+		v->voice_flags = PTV_VOICEFLAG_SMOOTH;
+		v->data_flags  = PTV_DATAFLAG_WAVE;
+		v->wave.reso   = 10000;
+		v->wave.points = (pxtnPOINT*)malloc( sizeof( pxtnPOINT ) * 32 );
+		_make_wave_points( wave, v->wave.points, &v->wave.num );
+
+		snprintf( wname, sizeof( wname ), "ptv %d", idx );
+	}
+	else // PTN noise
+	{
+		if( !v->p_ptn->Allocate( 1, 0 ) ){ _set_status( "noise allocate failed" ); return; }
+		pxNOISEDESIGN_UNIT* du = v->p_ptn->get_unit( 0 );
+		du->bEnable = true;
+		du->enve_num = 0;
+		du->pan    = 64;
+		du->main.type   = (pxWAVETYPE)( pxWAVETYPE_None + 1 + noise_type );
+		du->main.freq   = (float)nfreq;
+		du->main.volume = (float)nvol;
+		du->main.offset = (float)noffset;
+		du->main.b_rev  = false;
+		du->freq.type = pxWAVETYPE_None; du->freq.volume = 0;
+		du->volu.type = pxWAVETYPE_None; du->volu.volume = 0;
+		v->p_ptn->set_smp_num_44k( _SAMPLE_PER_SECOND / 4 ); // 0.25s
+		v->p_ptn->Fix();
+
+		v->type      = pxtnVOICE_Noise;
+		v->basic_key = basic_row << 8;
+		v->volume    = volume;
+		v->pan       = 64;
+
+		snprintf( wname, sizeof( wname ), "ptn %d", idx );
+	}
+	w->set_name_buf( wname, strlen( wname ) );
+
+	pxtnERR err = g_ed.pxtn->Woice_ReadyTone( idx );
+	if( err != pxtnOK ){ _set_status( "tone ready: %s", pxtnError_get_string( err ) ); return; }
+
+	// assign to the selected unit and preview it
+	int unit = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
+	if( unit >= 0 && unit < g_ed.unit_num )
+		g_ed.pxtn->Unit_Get_variable( unit )->set_woice( w );
+
+	_preview_note( unit < 0 ? 0 : unit, basic_row );
+	_set_status( "created %s (woice %d)", wname, idx );
+}
+
+static void _on_create_clicked( GtkButton*, gpointer user_data )
+{
+	// user_data: struct of dialog widgets
+	struct Dlg {
+		GtkWidget *type, *wave, *volume, *basic_row, *ntype, *nfreq, *noffset, *nvol, *dlgwin;
+	} *d = (Dlg*)user_data;
+
+	int type = (int)gtk_drop_down_get_selected( GTK_DROP_DOWN( d->type ) );
+	_create_sound(
+		type,
+		(int)gtk_drop_down_get_selected( GTK_DROP_DOWN( d->wave ) ),
+		(int)gtk_range_get_value( GTK_RANGE( d->volume ) ),
+		(int)gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->basic_row ) ),
+		(int)gtk_drop_down_get_selected( GTK_DROP_DOWN( d->ntype ) ),
+		gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->nfreq ) ),
+		gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->noffset ) ),
+		gtk_range_get_value( GTK_RANGE( d->nvol ) ) );
+
+	gtk_window_destroy( GTK_WINDOW( d->dlgwin ) );
+	delete d;
+}
+
+static void _sound_dialog()
+{
+	struct Dlg {
+		GtkWidget *type, *wave, *volume, *basic_row, *ntype, *nfreq, *noffset, *nvol, *dlgwin;
+	};
+	Dlg* d = new Dlg{};
+
+	GtkWidget* win = gtk_window_new();
+	gtk_window_set_title( GTK_WINDOW( win ), "create sound" );
+	gtk_window_set_default_size( GTK_WINDOW( win ), 380, 320 );
+	d->dlgwin = win;
+
+	GtkWidget* grid = gtk_grid_new();
+	gtk_grid_set_row_spacing( GTK_GRID( grid ), 6 );
+	gtk_grid_set_column_spacing( GTK_GRID( grid ), 8 );
+	gtk_widget_set_margin_start ( grid, 10 ); gtk_widget_set_margin_end  ( grid, 10 );
+	gtk_widget_set_margin_top   ( grid, 10 ); gtk_widget_set_margin_bottom( grid, 10 );
+	gtk_window_set_child( GTK_WINDOW( win ), grid );
+	int r = 0;
+
+	gtk_grid_attach( GTK_GRID( grid ), gtk_label_new( "type:" ), 0, r, 1, 1 );
+	d->type = gtk_drop_down_new_from_strings( (const char*[]){ "PTV wave", "PTN noise", NULL } );
+	gtk_grid_attach( GTK_GRID( grid ), d->type, 1, r++, 2, 1 );
+
+	// PTV params
+	gtk_grid_attach( GTK_GRID( grid ), gtk_label_new( "wave:" ), 0, r, 1, 1 );
+	d->wave = gtk_drop_down_new_from_strings( (const char*[]){ "sine", "saw", "square", "triangle", "pulse 1/4", NULL } );
+	gtk_grid_attach( GTK_GRID( grid ), d->wave, 1, r++, 2, 1 );
+
+	gtk_grid_attach( GTK_GRID( grid ), gtk_label_new( "volume:" ), 0, r, 1, 1 );
+	d->volume = gtk_scale_new_with_range( GTK_ORIENTATION_HORIZONTAL, 0, 128, 1 );
+	gtk_range_set_value( GTK_RANGE( d->volume ), 100 );
+	gtk_widget_set_hexpand( d->volume, TRUE );
+	gtk_grid_attach( GTK_GRID( grid ), d->volume, 1, r++, 2, 1 );
+
+	gtk_grid_attach( GTK_GRID( grid ), gtk_label_new( "basic key row:" ), 0, r, 1, 1 );
+	d->basic_row = gtk_spin_button_new_with_range( 0x24, 0x94, 1 );
+	gtk_spin_button_set_value( GTK_SPIN_BUTTON( d->basic_row ), 0x60 );
+	gtk_grid_attach( GTK_GRID( grid ), d->basic_row, 1, r++, 2, 1 );
+
+	// PTN params
+	gtk_grid_attach( GTK_GRID( grid ), gtk_label_new( "noise osc:" ), 0, r, 1, 1 );
+	d->ntype = gtk_drop_down_new_from_strings( (const char*[]){ "random", "sine", "saw", "rect", "saw2", "rect2", "tri", "random2", NULL } );
+	gtk_grid_attach( GTK_GRID( grid ), d->ntype, 1, r++, 2, 1 );
+
+	gtk_grid_attach( GTK_GRID( grid ), gtk_label_new( "noise freq:" ), 0, r, 1, 1 );
+	d->nfreq = gtk_spin_button_new_with_range( 0, 100, 0.5 );
+	gtk_spin_button_set_value( GTK_SPIN_BUTTON( d->nfreq ), 10 );
+	gtk_grid_attach( GTK_GRID( grid ), d->nfreq, 1, r++, 2, 1 );
+
+	gtk_grid_attach( GTK_GRID( grid ), gtk_label_new( "noise offset:" ), 0, r, 1, 1 );
+	d->noffset = gtk_spin_button_new_with_range( 0, 100, 1 );
+	gtk_spin_button_set_value( GTK_SPIN_BUTTON( d->noffset ), 0 );
+	gtk_grid_attach( GTK_GRID( grid ), d->noffset, 1, r++, 2, 1 );
+
+	gtk_grid_attach( GTK_GRID( grid ), gtk_label_new( "noise volume:" ), 0, r, 1, 1 );
+	d->nvol = gtk_scale_new_with_range( GTK_ORIENTATION_HORIZONTAL, 0, 1, 0.01 );
+	gtk_range_set_value( GTK_RANGE( d->nvol ), 0.8 );
+	gtk_widget_set_hexpand( d->nvol, TRUE );
+	gtk_grid_attach( GTK_GRID( grid ), d->nvol, 1, r++, 2, 1 );
+
+	GtkWidget* btn = gtk_button_new_with_label( "create & assign to unit" );
+	g_signal_connect( btn, "clicked", G_CALLBACK( _on_create_clicked ), d );
+	gtk_grid_attach( GTK_GRID( grid ), btn, 0, r, 3, 1 );
+
+	gtk_window_present( GTK_WINDOW( win ) );
 }
 
 // ---- drawing ------------------------------------------------------------
@@ -451,18 +738,22 @@ static void _activate( GtkApplication* app, gpointer )
 	gtk_box_append( GTK_BOX( vbox ), hbox );
 
 	gtk_box_append( GTK_BOX( hbox ), gtk_label_new( "unit:" ) );
-	const char** unit_names = (const char**)malloc( sizeof( char* ) * ( g_ed.unit_num + 1 ) );
+	GtkStringList* unit_list = gtk_string_list_new( NULL );
 	for( int i = 0; i < g_ed.unit_num; i++ )
 	{
 		int32_t size = 0;
 		const char* name = g_ed.pxtn->Unit_Get( i )->get_name_buf( &size );
-		char* copy = strdup( name && name[0] ? name : "(no name)" );
-		unit_names[ i ] = copy;
+		gtk_string_list_append( unit_list, name && name[0] ? name : "(no name)" );
 	}
-	unit_names[ g_ed.unit_num ] = NULL;
-	GtkStringList* unit_list = gtk_string_list_new( unit_names );
 	g_ed.unit_combo = gtk_drop_down_new( G_LIST_MODEL( unit_list ), NULL );
 	gtk_box_append( GTK_BOX( hbox ), g_ed.unit_combo );
+
+	GtkWidget* btn_unit  = gtk_button_new_with_label( "+unit" );
+	GtkWidget* btn_sound = gtk_button_new_with_label( "sound..." );
+	g_signal_connect_swapped( btn_unit,  "clicked", G_CALLBACK( +[]( gpointer ){ _add_unit(); } ), NULL );
+	g_signal_connect_swapped( btn_sound, "clicked", G_CALLBACK( +[]( gpointer ){ _sound_dialog(); } ), NULL );
+	gtk_box_append( GTK_BOX( hbox ), btn_unit );
+	gtk_box_append( GTK_BOX( hbox ), btn_sound );
 
 	gtk_box_append( GTK_BOX( hbox ), gtk_label_new( "snap:" ) );
 	g_ed.snap_combo = gtk_drop_down_new_from_strings( (const char*[]){ "1/4", "1/8", "1/16", "1/32", NULL } );
@@ -572,6 +863,9 @@ int main( int argc, char** argv )
 		return 1;
 	}
 
+	// separate device for note previews
+	g_ed.preview_dev = SDL_OpenAudioDevice( NULL, 0, &want, NULL, 0 );
+
 	GtkApplication* app = gtk_application_new( "com.github.pxtone.editor", G_APPLICATION_NON_UNIQUE );
 	g_signal_connect( app, "activate", G_CALLBACK( _activate ), NULL );
 	int ret = g_application_run( G_APPLICATION( app ), 0, NULL );
@@ -579,6 +873,7 @@ int main( int argc, char** argv )
 
 	_stop_play();
 	SDL_CloseAudio();
+	if( g_ed.preview_dev ) SDL_CloseAudioDevice( g_ed.preview_dev );
 	SDL_Quit();
 	return ret;
 }

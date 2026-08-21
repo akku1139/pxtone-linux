@@ -376,6 +376,13 @@ pxtnERR pxtnService::Woice_read( int32_t idx, void* desc, pxtnWOICETYPE type )
 	return res;
 }
 
+int32_t pxtnService::Woice_AddNew()
+{
+	if( !_b_init || _woice_num >= _woice_max ) return -1;
+	_woices[ _woice_num ] = new pxtnWoice( _io_read, _io_write, _io_seek, _io_pos );
+	return _woice_num++;
+}
+
 pxtnERR pxtnService::Woice_ReadyTone( int32_t idx )
 {
 	if( !_b_init ) return pxtnERR_INIT;
