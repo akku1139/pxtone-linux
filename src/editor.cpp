@@ -226,7 +226,8 @@ static void _drag_update( int x )
 		if( dur > max ) dur = max;
 
 		SDL_LockAudio();
-		g_ed.pxtn->evels->Record_Value_Set( g_ed.resize_clock, g_ed.resize_clock, (uint8_t)g_ed.resize_unit, EVENTKIND_ON, dur );
+		// Record_Value_Set matches clock1 <= c < clock2, so pass a +1 range
+		g_ed.pxtn->evels->Record_Value_Set( g_ed.resize_clock, g_ed.resize_clock + 1, (uint8_t)g_ed.resize_unit, EVENTKIND_ON, dur );
 		SDL_UnlockAudio();
 
 		gtk_widget_queue_draw( g_ed.draw_area );
@@ -914,8 +915,11 @@ int main( int argc, char** argv )
 		return 1;
 	}
 
-	// separate device for note previews
-	g_ed.preview_dev = SDL_OpenAudioDevice( NULL, 0, &want, NULL, 0 );
+	// separate device for note previews (no callback: we use SDL_QueueAudio)
+	SDL_AudioSpec pv = want;
+	pv.callback = NULL;
+	pv.userdata = NULL;
+	g_ed.preview_dev = SDL_OpenAudioDevice( NULL, 0, &pv, NULL, 0 );
 
 	GtkApplication* app = gtk_application_new( "com.github.pxtone.editor", G_APPLICATION_NON_UNIQUE );
 	g_signal_connect( app, "activate", G_CALLBACK( _activate ), NULL );
