@@ -462,6 +462,13 @@ static int32_t _meas_clock()
 	return bc * m->get_beat_num();
 }
 
+static double _samples_per_clock()
+{
+	pxtnMaster* m = g_ed.pxtn->master;
+	double bc = m->get_beat_clock(); if( bc <= 0 ) bc = _BEAT_CLOCK;
+	return (double)_SAMPLE_PER_SECOND * 60.0 / ( g_ed.tempo * bc );
+}
+
 static void _reprep_keep_pos()
 {
 	if( !g_ed.loaded || !g_ed.pxtn ) return;
@@ -469,27 +476,26 @@ static void _reprep_keep_pos()
 	pxtnMaster* m = g_ed.pxtn->master;
 	int32_t mc = _meas_clock(); if( mc <= 0 ) mc = 1;
 	int32_t play_meas = m->get_last_meas() ? m->get_last_meas() : m->get_meas_num();
-	double total_sec = (double)play_meas * m->get_beat_num() * 60.0 / g_ed.tempo;
 
-	double cur_sec = (double)g_ed.played_samples / _SAMPLE_PER_SECOND;
-	double frac = total_sec > 0 ? MIN( MAX( cur_sec / total_sec, 0.0 ), 0.999 ) : 0;
+	// current position as fraction of the NEW song length
+	double total_sec_new = (double)play_meas * m->get_beat_num() * 60.0 / g_ed.tempo;
+	double cur_sec       = (double)g_ed.played_samples / _SAMPLE_PER_SECOND;
+	double frac = total_sec_new > 0 ? MIN( MAX( cur_sec / total_sec_new, 0.0 ), 0.999 ) : 0;
 
-	SDL_LockAudio(); // serialize against the audio callback (Moo reads these)
-	bool was = g_ed.playing;
-	if( was )
-	{
-		pxtnVOMITPREPARATION prep = {0};
-		prep.flags          |= pxtnVOMITPREPFLAG_loop | pxtnVOMITPREPFLAG_unit_mute;
-		prep.start_pos_float = (float)frac;
-		prep.master_volume   = 0.80f;
-		if( g_ed.pxtn->moo_preparation( &prep ) )
-		{
-			double total_smp = (double)play_meas * m->get_beat_num() * ( 60.0 / g_ed.tempo ) * _SAMPLE_PER_SECOND;
-			g_ed.played_samples = (int64_t)( frac * total_smp );
-			fprintf( stderr, "[reprep] playmeas=%d frac=%.3f total=%.0f\n",
-				play_meas, frac, total_smp );
-		}
-	}
+	// target start position in SAMPLES (relative to the new length)
+	double spc = _samples_per_clock();
+	int32_t start_sample = (int32_t)( frac * play_meas * mc * spc );
+
+	fprintf( stderr, "[reprep] playmeas=%d frac=%.3f start=%d\n", play_meas, frac, start_sample );
+
+	pxtnVOMITPREPARATION prep = {0};
+	prep.flags          |= pxtnVOMITPREPFLAG_loop | pxtnVOMITPREPFLAG_unit_mute;
+	prep.start_pos_sample = start_sample;
+	prep.master_volume    = 0.80f;
+	SDL_LockAudio();
+	bool ok = g_ed.pxtn->moo_preparation( &prep );
+	if( ok )
+		g_ed.played_samples = (int64_t)( start_sample );
 	SDL_UnlockAudio();
 }
 
@@ -527,13 +533,8 @@ static void _start_play()
 	g_ed.played_samples = 0;
 	if( g_ed.has_pstart )
 	{
-		double total = g_ed.pxtn->moo_get_total_sample();
-		if( total > 0 )
-		{
-			double frac = (double)g_ed.pstart_clock * _sec_per_clock() * _SAMPLE_PER_SECOND / total;
-			frac = MIN( MAX( frac, 0.0 ), 0.999 );
-			g_ed.played_samples = (int64_t)( frac * total );
-		}
+		double spc = _samples_per_clock();
+		g_ed.played_samples = (int64_t)( g_ed.pstart_clock * spc );
 	}
 	g_ed.playing = true;
 	if( g_ed.tb_play && !gtk_toggle_button_get_active( g_ed.tb_play ) )
@@ -545,23 +546,24 @@ static void _seek_to( int32_t clock )
 {
 	g_ed.has_pstart   = true;
 	g_ed.pstart_clock = clock;
-	if( !g_ed.loaded ){ g_ed.has_pstart = false; return; }
+	if( !g_ed.loaded || !g_ed.playing )
+	{
+		gtk_widget_queue_draw( g_ed.draw_area );
+		return; // takes effect on next play
+	}
 
-	double total = g_ed.pxtn->moo_get_total_sample();
-	if( total <= 0 ){ gtk_widget_queue_draw( g_ed.draw_area ); return; }
-	double frac = (double)clock * _sec_per_clock() * _SAMPLE_PER_SECOND / total;
-	frac = MIN( MAX( frac, 0.0 ), 0.999 );
+	double spc = _samples_per_clock();
+	int32_t start_sample = (int32_t)( clock * spc );
 
 	pxtnVOMITPREPARATION prep = {0};
-	prep.flags          |= pxtnVOMITPREPFLAG_loop | pxtnVOMITPREPFLAG_unit_mute;
-	prep.start_pos_float = (float)frac;
-	prep.master_volume   = 0.80f;
+	prep.flags            |= pxtnVOMITPREPFLAG_loop | pxtnVOMITPREPFLAG_unit_mute;
+	prep.start_pos_sample   = start_sample;
+	prep.master_volume      = 0.80f;
 	SDL_LockAudio();
 	bool ok = g_ed.pxtn->moo_preparation( &prep );
 	SDL_UnlockAudio();
-	if( ok ) g_ed.played_samples = (int64_t)( frac * total );
-	else
-		g_ed.playing = false;
+	if( ok ) g_ed.played_samples = (int64_t)( clock * spc );
+	else     g_ed.playing = false;
 	gtk_widget_queue_draw( g_ed.draw_area );
 }
 
