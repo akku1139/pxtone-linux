@@ -424,6 +424,20 @@ static void _sdl_audio_callback( void*, Uint8* stream, int len )
 {
 	if( !g_ed.pxtn || !g_ed.playing ) memset( stream, 0, len );
 	else if( !g_ed.pxtn->Moo( stream, len ) ) memset( stream, 0, len );
+	// wrap the DISPLAYED position at the song/loop boundaries (Moo itself
+	// loops back to the repeat measure; without this the playhead would run
+	// past the red line forever)
+	if( g_ed.pxtn && g_ed.playing )
+	{
+		pxtnMaster* m = g_ed.pxtn->master;
+		int32_t mc = m->get_beat_clock() * m->get_beat_num(); if( mc <= 0 ) mc = _BEAT_CLOCK;
+		double spc = (double)_SAMPLE_PER_SECOND * 60.0 / ( g_ed.tempo * m->get_beat_clock() );
+		int32_t pm = m->get_last_meas() ? m->get_last_meas() : m->get_meas_num();
+		int64_t total = (int64_t)( pm * mc * spc );
+		int64_t rep   = (int64_t)( m->get_repeat_meas() * mc * spc );
+		if( total > 0 && g_ed.played_samples >= total )
+			g_ed.played_samples = rep + ( ( g_ed.played_samples - rep ) % MAX( 1, total - rep ) );
+	}
 	g_ed.played_samples += len / ( _CHANNEL_NUM * sizeof(int16_t) );
 
 	// mix preview FIFO
