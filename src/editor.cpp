@@ -833,6 +833,29 @@ static void _apply_simple_envelope( pxtnVOICEUNIT* v )
 	e.points[3] = {  6,   0 };  // release 100ms
 }
 
+// harmonic spectra for the timbre selector (x=harmonic no, y=level)
+static void _make_harmonic_points( int timbre, pxtnPOINT* pts, int32_t* p_num )
+{
+	switch( timbre )
+	{
+	case 1: // bright
+		pts[0]={1,128}; pts[1]={2,96}; pts[2]={3,64}; pts[3]={4,40}; pts[4]={5,24};
+		*p_num = 5; break;
+	case 2: // hollow
+		pts[0]={1,128}; pts[1]={3,64}; pts[2]={5,32};
+		*p_num = 3; break;
+	case 3: // warm
+		pts[0]={1,128}; pts[1]={2,80}; pts[2]={4,40};
+		*p_num = 3; break;
+	case 4: // reedy
+		pts[0]={1,128}; pts[1]={2,20}; pts[2]={4,90}; pts[3]={6,30};
+		*p_num = 4; break;
+	default: // pure
+		pts[0]={1,128};
+		*p_num = 1; break;
+	}
+}
+
 // Build a PTV/PTN voice into a freshly allocated woice. Returns false on error.
 static bool _build_sound_woice( pxtnWoice* w, int type, int wave, int volume, int basic_row,
                                 int noise_type, double nfreq, double noffset, double nvol )
@@ -840,18 +863,19 @@ static bool _build_sound_woice( pxtnWoice* w, int type, int wave, int volume, in
 	if( !w->Voice_Allocate( 1 ) ) return false;
 	pxtnVOICEUNIT* v = w->get_voice_variable( 0 );
 
-	if( type == 0 ) // PTV
+	if( type == 0 ) // PTV (overtone synthesis, like stock pxTone default tones)
 	{
-		v->type      = pxtnVOICE_Coodinate;
-		v->basic_key = basic_row << 8;
-		v->volume    = volume;
+		v->type      = pxtnVOICE_Overtone;
+		v->basic_key = 0x4500 << 0; // A4 base (same as stock default 0x4500)
+		v->volume    = 128;
 		v->pan       = 64;
 		v->tuning    = 1.0f;
-		v->voice_flags = PTV_VOICEFLAG_SMOOTH;
+		v->voice_flags = PTV_VOICEFLAG_SMOOTH | PTV_VOICEFLAG_WAVELOOP;
 		v->data_flags  = PTV_DATAFLAG_WAVE;
-		v->wave.reso   = 10000;
-		v->wave.points = (pxtnPOINT*)malloc( sizeof( pxtnPOINT ) * 32 );
-		_make_wave_points( wave, v->wave.points, &v->wave.num );
+		v->wave.num    = 8; // max harmonics slot
+		v->wave.points = (pxtnPOINT*)malloc( sizeof( pxtnPOINT ) * 8 );
+		_make_harmonic_points( wave, v->wave.points, &v->wave.num );
+		(void)basic_row; (void)volume; // stock defaults fixed like sample.ptcop
 	}
 	else // PTN noise
 	{
@@ -893,26 +917,27 @@ static void _wave_canvas_cb( GtkDrawingArea*, cairo_t* cr, int w, int h, gpointe
 
 	int sel = (int)gtk_drop_down_get_selected( GTK_DROP_DOWN( d->wave ) );
 	if( sel < 0 ) return;
+
 	if( gtk_drop_down_get_selected( GTK_DROP_DOWN( d->type ) ) != 0 )
 	{
+		// noise: flat line
 		cairo_set_source_rgb( cr, 0.6, 0.6, 0.7 );
 		cairo_move_to( cr, 4, h / 2 ); cairo_line_to( cr, w - 4, h / 2 ); cairo_stroke( cr );
 		return;
 	}
 
-	pxtnPOINT pts[ 32 ]; int32_t n = 0;
-	_make_wave_points( sel, pts, &n );
-
+	// overtone harmonics as bars
+	pxtnPOINT pts[ 8 ]; int32_t n = 0;
+	_make_harmonic_points( sel, pts, &n );
 	cairo_set_source_rgb( cr, 0.35, 0.85, 1.0 );
-	cairo_set_line_width( cr, 2 );
-	for( int i = 0; i <= n; i++ )
+	for( int i = 0; i < n; i++ )
 	{
-		const pxtnPOINT& pt = pts[ i % n ];
-		double x = 4 + ( w - 8 ) * pt.x / 10000.0;
-		double y = h / 2 - h * 0.4 * pt.y / 128.0;
-		if( i == 0 ) cairo_move_to( cr, x, y ); else cairo_line_to( cr, x, y );
+		double bw = ( w - 8 ) / 6.0;
+		double x  = 4 + bw * ( pts[ i ].x - 1 ) + bw * 0.25;
+		double bh = ( h * 0.7 ) * pts[ i ].y / 128.0;
+		cairo_rectangle( cr, x, h - 6 - bh, bw * 0.5, bh );
+		cairo_fill( cr );
 	}
-	cairo_stroke( cr );
 }
 
 static void _create_sound( int type, int wave, int volume, int basic_row,
@@ -1027,7 +1052,7 @@ static void _sound_dialog()
 
 	gtk_grid_attach( GTK_GRID( grid ), gtk_label_new( "basic key row:" ), 0, r, 1, 1 );
 	d->basic_row = gtk_spin_button_new_with_range( 0x24, 0x94, 1 );
-	gtk_spin_button_set_value( GTK_SPIN_BUTTON( d->basic_row ), 0x60 );
+	gtk_spin_button_set_value( GTK_SPIN_BUTTON( d->basic_row ), 0x45 );
 	gtk_grid_attach( GTK_GRID( grid ), d->basic_row, 1, r++, 2, 1 );
 
 	// PTN params
@@ -1057,11 +1082,11 @@ static void _sound_dialog()
 	gtk_widget_set_size_request( d->wavecanvas, -1, 60 );
 	gtk_grid_attach( GTK_GRID( grid ), d->wavecanvas, 0, r++, 2, 1 );
 	g_signal_connect_swapped( d->wave, "notify::selected",
-		G_CALLBACK( +[]( gpointer, gpointer ud ){ gtk_widget_queue_draw( GTK_WIDGET( ud ) ); } ), d->wavecanvas );
+		G_CALLBACK( +[]( gpointer ud ){ gtk_widget_queue_draw( GTK_WIDGET( ud ) ); } ), d->wavecanvas );
 
 	gtk_grid_attach( GTK_GRID( grid ), gtk_label_new( "audition key row:" ), 0, r, 1, 1 );
 	d->audkey = gtk_spin_button_new_with_range( _ROW_MIN, _ROW_MAX, 1 );
-	gtk_spin_button_set_value( GTK_SPIN_BUTTON( d->audkey ), 0x60 );
+	gtk_spin_button_set_value( GTK_SPIN_BUTTON( d->audkey ), 0x5d ); // ~440Hz with 0x4500 base
 	gtk_grid_attach( GTK_GRID( grid ), d->audkey, 1, r++, 1, 1 );
 
 	gtk_grid_attach( GTK_GRID( grid ), gtk_label_new( "audition length (%):" ), 0, r, 1, 1 );
@@ -1900,10 +1925,14 @@ static bool _init_new_project()
 	pxtnWoice* wv = g_ed.pxtn->Woice_Get_variable( w );
 	wv->Voice_Allocate( 1 );
 	pxtnVOICEUNIT* v = wv->get_voice_variable( 0 );
-	v->type = pxtnVOICE_Coodinate; v->basic_key = 0x6000; v->volume = 100;
-	v->wave.reso = 10000;
-	v->wave.points = (pxtnPOINT*)malloc( sizeof( pxtnPOINT ) * 32 );
-	_make_wave_points( 0, v->wave.points, &v->wave.num ); // sine
+	v->type      = pxtnVOICE_Overtone;   // stock pxTone default tone style
+	v->basic_key = 0x4500;
+	v->volume    = 128;
+	v->voice_flags = PTV_VOICEFLAG_SMOOTH | PTV_VOICEFLAG_WAVELOOP;
+	v->data_flags  = PTV_DATAFLAG_WAVE;
+	v->wave.num    = 8;
+	v->wave.points = (pxtnPOINT*)malloc( sizeof( pxtnPOINT ) * 8 );
+	_make_harmonic_points( 1, v->wave.points, &v->wave.num ); // bright
 	_apply_simple_envelope( v );
 
 	// the unit must have a tone-ready woice, or Moo/preview will crash
