@@ -82,8 +82,10 @@ struct Editor
 	std::atomic<int64_t> played_samples {0};
 	std::atomic<bool>    playing        {false};
 
-	// preview (note audition)
-	SDL_AudioDeviceID preview_dev = 0;
+	// preview: FIFO mixed into the main audio callback (works before first Play)
+	std::vector<int16_t> pv_buf;
+	std::atomic<uint64_t> pv_read  {0};
+	std::atomic<uint64_t> pv_write {0};
 
 	// widgets
 	GtkWidget* window    = NULL;
@@ -102,6 +104,7 @@ static void _preview_note( int unit, int row ); // fwd
 // ---- undo/redo (project snapshots) --------------------------------------
 
 static void _set_status( const char* fmt, ... ); // fwd
+static void _save_as_path( const char* path ); // fwd
 
 struct SongSnap
 {
@@ -147,13 +150,24 @@ static void _push_undo()
 	g_redo.clear();
 }
 
+// Restore a project snapshot safely: the audio callback must not run while
+// the event array is reallocated (caused a segfault when undoing/redoing
+// during playback).
+static void _restore_safely( const SongSnap& s )
+{
+	bool was_playing = g_ed.playing;
+	SDL_PauseAudio( 1 );   // stop the mixer before freeing/rebuilding events
+	SDL_LockAudio();
+	_restore_snapshot( s );
+	SDL_UnlockAudio();
+	if( was_playing ) SDL_PauseAudio( 0 );
+}
+
 static void _undo()
 {
 	if( g_undo.empty() ) return;
 	g_redo.push_back( _snapshot() );
-	SDL_LockAudio();
-	_restore_snapshot( g_undo.back() );
-	SDL_UnlockAudio();
+	_restore_safely( g_undo.back() );
 	g_undo.pop_back();
 	_set_status( "undo (%d left)", (int)g_undo.size() );
 	gtk_widget_queue_draw( g_ed.draw_area );
@@ -163,9 +177,7 @@ static void _redo()
 {
 	if( g_redo.empty() ) return;
 	g_undo.push_back( _snapshot() );
-	SDL_LockAudio();
-	_restore_snapshot( g_redo.back() );
-	SDL_UnlockAudio();
+	_restore_safely( g_redo.back() );
 	g_redo.pop_back();
 	_set_status( "redo" );
 	gtk_widget_queue_draw( g_ed.draw_area );
@@ -255,9 +267,28 @@ static void _ensure_evels_capacity()
 
 static void _sdl_audio_callback( void*, Uint8* stream, int len )
 {
-	if( !g_ed.pxtn || !g_ed.playing ) { memset( stream, 0, len ); return; }
-	if( !g_ed.pxtn->Moo( stream, len ) ) memset( stream, 0, len );
+	if( !g_ed.pxtn || !g_ed.playing ) memset( stream, 0, len );
+	else if( !g_ed.pxtn->Moo( stream, len ) ) memset( stream, 0, len );
 	g_ed.played_samples += len / ( _CHANNEL_NUM * sizeof(int16_t) );
+
+	// mix queued preview samples on top (works before the first Play)
+	int16_t* out = (int16_t*)stream;
+	size_t   frames  = len / ( _CHANNEL_NUM * sizeof(int16_t) );
+	size_t   cap     = g_ed.pv_buf.size() / _CHANNEL_NUM;
+	uint64_t rd      = g_ed.pv_read;
+	uint64_t wr      = g_ed.pv_write;
+	for( size_t f = 0; f < frames && rd + _CHANNEL_NUM <= wr; f++ )
+	{
+		for( int c = 0; c < _CHANNEL_NUM; c++ )
+		{
+			double s = out[ f * _CHANNEL_NUM + c ] / 32768.0 + g_ed.pv_buf[ (rd % cap) * _CHANNEL_NUM + c ] / 32768.0;
+			if( s >  1 ) s =  1;
+			if( s < -1 ) s = -1;
+			out[ f * _CHANNEL_NUM + c ] = (int16_t)( s * 32767 );
+			rd++;
+		}
+	}
+	g_ed.pv_read = rd;
 }
 
 static void _start_play()
@@ -425,9 +456,12 @@ static void _delete_note( int32_t clock, int row )
 	gtk_widget_queue_draw( g_ed.draw_area );
 }
 
+static void _save_as_dialog(); // fwd
+
 static void _save()
 {
 	if( !g_ed.loaded ) return;
+	if( g_ed.path.empty() ){ _save_as_dialog(); return; } // new tune: ask for a file name
 	FILE* fp = fopen( g_ed.path.c_str(), "wb" );
 	if( !fp ){ _set_status( "ERROR: cannot write %s", g_ed.path.c_str() ); return; }
 	pxtnERR err = g_ed.pxtn->write( fp, false, 0x0500 ); // b_tune=false: .ptcop project format (rough=1, lossless)
@@ -436,17 +470,103 @@ static void _save()
 	_set_status( "saved: %s", g_ed.path.c_str() );
 }
 
+static void _on_save_as_ok( GtkButton*, gpointer user_data )
+{
+	typedef struct { GtkWidget *entry,*dlgwin; } D;
+	D* d = (D*)user_data;
+	const char* text = g_strdup( gtk_editable_get_text( GTK_EDITABLE( d->entry ) ) );
+	gtk_window_destroy( GTK_WINDOW( d->dlgwin ) );
+	if( text && text[0] ) _save_as_path( text );
+	g_free( (gpointer)text );
+	delete d;
+}
+
+static void _save_as_dialog()
+{
+	typedef struct { GtkWidget *entry,*dlgwin; } D;
+	D* d = new D{};
+
+	GtkWidget* win = gtk_window_new();
+	gtk_window_set_title( GTK_WINDOW( win ), "save as" );
+	gtk_window_set_default_size( GTK_WINDOW( win ), 420, 100 );
+	d->dlgwin = win;
+
+	GtkWidget* box = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 6 );
+	gtk_widget_set_margin_start ( box, 10 ); gtk_widget_set_margin_end( box, 10 );
+	gtk_widget_set_margin_top   ( box, 10 ); gtk_widget_set_margin_bottom( box, 10 );
+	gtk_window_set_child( GTK_WINDOW( win ), box );
+
+	gtk_box_append( GTK_BOX( box ), gtk_label_new( "file:" ) );
+	d->entry = gtk_entry_new();
+	if( !g_ed.path.empty() ) gtk_editable_set_text( GTK_EDITABLE( d->entry ), g_ed.path.c_str() );
+	else                     gtk_editable_set_text( GTK_EDITABLE( d->entry ), "untitled.ptcop" );
+	gtk_widget_set_hexpand( d->entry, TRUE );
+	gtk_box_append( GTK_BOX( box ), d->entry );
+
+	GtkWidget* btn = gtk_button_new_with_label( "save" );
+	g_signal_connect( btn, "clicked", G_CALLBACK( _on_save_as_ok ), d );
+	gtk_box_append( GTK_BOX( box ), btn );
+
+	gtk_window_present( GTK_WINDOW( win ) );
+}
+
+static void _refresh_unit_combo(); // fwd
+static void _make_wave_points( int type, pxtnPOINT* pts, int32_t* p_num ); // fwd
+
+// ---- new tune ------------------------------------------------------------
+
+static void _new_tune()
+{
+	SDL_PauseAudio( 1 );
+	SDL_LockAudio();
+	delete g_ed.pxtn;
+	g_ed.pxtn = new pxtnService( _pxtn_r, _pxtn_w, _pxtn_s, _pxtn_p );
+	g_ed.err.clear();
+	if( g_ed.pxtn->init() != pxtnOK ){ g_ed.err = "init failed"; SDL_UnlockAudio(); return; }
+	g_ed.pxtn->set_destination_quality( _CHANNEL_NUM, _SAMPLE_PER_SECOND );
+	g_ed.pxtn->master->Set( 4, 120.0f, _BEAT_CLOCK );
+	g_ed.pxtn->master->set_meas_num   ( 32 );
+	g_ed.pxtn->master->set_last_meas  ( 31 );
+	g_ed.pxtn->evels->Allocate( 8192 );
+	g_ed.pxtn->Unit_AddNew();
+	int w = g_ed.pxtn->Woice_AddNew();
+	pxtnWoice* wv = g_ed.pxtn->Woice_Get_variable( w );
+	wv->Voice_Allocate( 1 );
+	pxtnVOICEUNIT* v = wv->get_voice_variable( 0 );
+	v->type = pxtnVOICE_Coodinate; v->basic_key = 0x6000; v->volume = 100;
+	v->wave.reso = 10000;
+	v->wave.points = (pxtnPOINT*)malloc( sizeof( pxtnPOINT ) * 32 );
+	_make_wave_points( 0, v->wave.points, &v->wave.num ); // sine
+	SDL_UnlockAudio();
+
+	// reset editor state
+	g_undo.clear(); g_redo.clear(); g_clipboard.clear();
+	g_ed.has_sel = false; g_ed.dragging = false; g_ed.mode = DRAG_NONE;
+	g_ed.unit_num = 1; g_ed.tempo = 120.0; g_ed.loaded = true;
+	g_ed.path.clear();
+	g_ed.h_offset = 0; g_ed.v_offset = 0;
+
+	_refresh_unit_combo();
+	_set_status( "new tune created (unsaved)" );
+	gtk_widget_queue_draw( g_ed.draw_area );
+}
+
+// ---- save as -------------------------------------------------------------
+
+static void _save_as_path( const char* path )
+{
+	g_ed.path = path;
+	_save();
+}
+
 // ---- note preview (audition) --------------------------------------------
 
-// Render ~0.35s of the unit's woice pitched to the key row and queue it.
-static void _preview_note( int unit, int row )
+// Render ~0.35s of the woice pitched to the key row into the preview FIFO
+// (mixed into the main audio callback).
+static void _preview_woice( const pxtnWoice* woice, int row )
 {
-	if( !g_ed.preview_dev || unit < 0 || unit >= g_ed.unit_num ) return;
-
-	const pxtnWoice* woice = g_ed.pxtn->Unit_Get( unit )->get_woice();
 	if( !woice ) return;
 
-	const double PI = 3.141592653589793;
 	const int32_t SPSEC = _SAMPLE_PER_SECOND;
 	const int dur_frames = SPSEC * 35 / 100; // 0.35s
 
@@ -481,9 +601,23 @@ static void _preview_note( int unit, int row )
 		if( s < -1 ) s = -1;
 		out[ i ] = (int16_t)( s * 32767 );
 	}
-	SDL_ClearQueuedAudio( g_ed.preview_dev );
-	if( SDL_QueueAudio( g_ed.preview_dev, out.data(), out.size() * sizeof( int16_t ) ) != 0 )
-		_set_status( "preview queue error: %s", SDL_GetError() );
+
+	// append to the preview FIFO (drop oldest if full)
+	size_t cap = g_ed.pv_buf.size();
+	if( cap == 0 ) return;
+	for( size_t i = 0; i < out.size(); i++ )
+	{
+		uint64_t wr = g_ed.pv_write;
+		if( wr - g_ed.pv_read >= cap ) g_ed.pv_read = wr - cap + 1;
+		g_ed.pv_buf[ wr % cap ] = out[ i ];
+		g_ed.pv_write = wr + 1;
+	}
+}
+
+static void _preview_note( int unit, int row )
+{
+	if( unit < 0 || unit >= g_ed.unit_num ) return;
+	_preview_woice( g_ed.pxtn->Unit_Get( unit )->get_woice(), row );
 }
 
 // ---- track (unit) add ---------------------------------------------------
@@ -560,17 +694,12 @@ static void _make_wave_points( int type, pxtnPOINT* pts, int32_t* p_num )
 	}
 }
 
-static void _create_sound( int type, int wave, int volume, int basic_row,
-                           int noise_type, double nfreq, double noffset, double nvol )
+// Build a PTV/PTN voice into a freshly allocated woice. Returns false on error.
+static bool _build_sound_woice( pxtnWoice* w, int type, int wave, int volume, int basic_row,
+                                int noise_type, double nfreq, double noffset, double nvol )
 {
-	int idx = g_ed.pxtn->Woice_AddNew();
-	if( idx < 0 ){ _set_status( "woice max reached" ); return; }
-
-	pxtnWoice* w = g_ed.pxtn->Woice_Get_variable( idx );
-	if( !w->Voice_Allocate( 1 ) ){ _set_status( "voice allocate failed" ); return; }
-
+	if( !w->Voice_Allocate( 1 ) ) return false;
 	pxtnVOICEUNIT* v = w->get_voice_variable( 0 );
-	char wname[ 32 ];
 
 	if( type == 0 ) // PTV
 	{
@@ -584,12 +713,10 @@ static void _create_sound( int type, int wave, int volume, int basic_row,
 		v->wave.reso   = 10000;
 		v->wave.points = (pxtnPOINT*)malloc( sizeof( pxtnPOINT ) * 32 );
 		_make_wave_points( wave, v->wave.points, &v->wave.num );
-
-		snprintf( wname, sizeof( wname ), "ptv %d", idx );
 	}
 	else // PTN noise
 	{
-		if( !v->p_ptn->Allocate( 1, 0 ) ){ _set_status( "noise allocate failed" ); return; }
+		if( !v->p_ptn->Allocate( 1, 0 ) ) return false;
 		pxNOISEDESIGN_UNIT* du = v->p_ptn->get_unit( 0 );
 		du->bEnable = true;
 		du->enve_num = 0;
@@ -608,9 +735,22 @@ static void _create_sound( int type, int wave, int volume, int basic_row,
 		v->basic_key = basic_row << 8;
 		v->volume    = volume;
 		v->pan       = 64;
-
-		snprintf( wname, sizeof( wname ), "ptn %d", idx );
 	}
+	return true;
+}
+
+static void _create_sound( int type, int wave, int volume, int basic_row,
+                           int noise_type, double nfreq, double noffset, double nvol )
+{
+	int idx = g_ed.pxtn->Woice_AddNew();
+	if( idx < 0 ){ _set_status( "woice max reached" ); return; }
+
+	pxtnWoice* w = g_ed.pxtn->Woice_Get_variable( idx );
+	if( !_build_sound_woice( w, type, wave, volume, basic_row, noise_type, nfreq, noffset, nvol ) )
+		{ _set_status( "voice build failed" ); return; }
+
+	char wname[ 32 ];
+	snprintf( wname, sizeof( wname ), "%s %d", type == 0 ? "ptv" : "ptn", idx );
 	w->set_name_buf( wname, strlen( wname ) );
 
 	pxtnERR err = g_ed.pxtn->Woice_ReadyTone( idx );
@@ -623,6 +763,36 @@ static void _create_sound( int type, int wave, int volume, int basic_row,
 
 	_preview_note( unit < 0 ? 0 : unit, basic_row );
 	_set_status( "created %s (woice %d)", wname, idx );
+}
+
+// build a temporary woice, audition it, then remove it (nothing is saved)
+static void _audition_sound( int type, int wave, int volume, int basic_row,
+                             int noise_type, double nfreq, double noffset, double nvol )
+{
+	int idx = g_ed.pxtn->Woice_AddNew();
+	if( idx < 0 ){ _set_status( "woice max reached" ); return; }
+	pxtnWoice* w = g_ed.pxtn->Woice_Get_variable( idx );
+	if( !_build_sound_woice( w, type, wave, volume, basic_row, noise_type, nfreq, noffset, nvol ) )
+		{ g_ed.pxtn->Woice_Remove( idx ); return; }
+	if( g_ed.pxtn->Woice_ReadyTone( idx ) != pxtnOK ){ g_ed.pxtn->Woice_Remove( idx ); return; }
+	_preview_woice( w, basic_row ); // render into the FIFO synchronously
+	g_ed.pxtn->Woice_Remove( idx );
+}
+
+static void _on_audition_clicked( GtkButton*, gpointer user_data )
+{
+	struct Dlg {
+		GtkWidget *type, *wave, *volume, *basic_row, *ntype, *nfreq, *noffset, *nvol, *dlgwin;
+	} *d = (Dlg*)user_data;
+	_audition_sound(
+		(int)gtk_drop_down_get_selected( GTK_DROP_DOWN( d->type ) ),
+		(int)gtk_drop_down_get_selected( GTK_DROP_DOWN( d->wave ) ),
+		(int)gtk_range_get_value( GTK_RANGE( d->volume ) ),
+		(int)gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->basic_row ) ),
+		(int)gtk_drop_down_get_selected( GTK_DROP_DOWN( d->ntype ) ),
+		gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->nfreq ) ),
+		gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->noffset ) ),
+		gtk_range_get_value( GTK_RANGE( d->nvol ) ) );
 }
 
 static void _on_create_clicked( GtkButton*, gpointer user_data )
@@ -708,9 +878,13 @@ static void _sound_dialog()
 	gtk_widget_set_hexpand( d->nvol, TRUE );
 	gtk_grid_attach( GTK_GRID( grid ), d->nvol, 1, r++, 2, 1 );
 
+	GtkWidget* btn_aud = gtk_button_new_with_label( "audition" );
+	g_signal_connect( btn_aud, "clicked", G_CALLBACK( _on_audition_clicked ), d );
+	gtk_grid_attach( GTK_GRID( grid ), btn_aud, 0, r, 1, 1 );
+
 	GtkWidget* btn = gtk_button_new_with_label( "create & assign to unit" );
 	g_signal_connect( btn, "clicked", G_CALLBACK( _on_create_clicked ), d );
-	gtk_grid_attach( GTK_GRID( grid ), btn, 0, r, 3, 1 );
+	gtk_grid_attach( GTK_GRID( grid ), btn, 1, r, 2, 1 );
 
 	gtk_window_present( GTK_WINDOW( win ) );
 }
@@ -836,7 +1010,9 @@ static void _on_rename_ok( GtkButton*, gpointer user_data )
 	int unit = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
 	if( unit < 0 || unit >= g_ed.unit_num ) return;
 
-	const char* text = gtk_editable_get_text( GTK_EDITABLE( d->entry ) );
+	char text[ pxtnMAX_TUNEUNITNAME + 1 ];
+	const char* src = gtk_editable_get_text( GTK_EDITABLE( d->entry ) );
+	snprintf( text, sizeof( text ), "%s", src ? src : "" );
 	if( !text[0] ){ gtk_window_destroy( GTK_WINDOW( d->dlgwin ) ); delete d; return; }
 
 	SDL_LockAudio();
@@ -1028,6 +1204,28 @@ static void _draw_cb( GtkDrawingArea*, cairo_t* cr, int w, int h, gpointer )
 			cairo_stroke( cr );
 		}
 		cairo_set_line_width( cr, 1.0 );
+
+		// loop structure markers: repeat (green) / last (red)
+		if( meas_clock > 0 )
+		{
+			int32_t rm = g_ed.pxtn->master->get_repeat_meas();
+			int32_t lm = g_ed.pxtn->master->get_last_meas();
+			if( rm >= 0 )
+			{
+				double x = rm * meas_clock * g_ed.px_per_clock - g_ed.h_offset;
+				cairo_set_source_rgb( cr, 0.2, 0.9, 0.3 );
+				cairo_set_line_width( cr, 2.0 );
+				cairo_move_to( cr, x, 0 ); cairo_line_to( cr, x, content_h ); cairo_stroke( cr );
+			}
+			if( lm >= 0 )
+			{
+				double x = ( lm + 1 ) * meas_clock * g_ed.px_per_clock - g_ed.h_offset;
+				cairo_set_source_rgb( cr, 0.95, 0.25, 0.25 );
+				cairo_set_line_width( cr, 2.0 );
+				cairo_move_to( cr, x, 0 ); cairo_line_to( cr, x, content_h ); cairo_stroke( cr );
+			}
+			cairo_set_line_width( cr, 1.0 );
+		}
 	}
 
 	// notes
@@ -1047,6 +1245,11 @@ static void _draw_cb( GtkDrawingArea*, cairo_t* cr, int w, int h, gpointer )
 
 		double r, g, b;
 		_unit_color( p->unit_no, &r, &g, &b );
+		// dim notes of non-active units (active unit stands out)
+		{
+			int sel_unit = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
+			if( sel_unit >= 0 && p->unit_no != sel_unit ){ r *= 0.35; g *= 0.35; b *= 0.35; }
+		}
 		// shade by velocity if one is set
 		{
 			int32_t vel = g_ed.pxtn->evels->get_Value( p->clock, p->unit_no, EVENTKIND_VELOCITY );
@@ -1297,6 +1500,10 @@ static void _activate( GtkApplication* app, gpointer )
 	GtkWidget* btn_event = gtk_button_new_with_label( "event..." );
 	GtkWidget* btn_rename= gtk_button_new_with_label( "rename" );
 	GtkWidget* btn_song  = gtk_button_new_with_label( "song..." );
+	GtkWidget* btn_new   = gtk_button_new_with_label( "new" );
+	GtkWidget* btn_saveas= gtk_button_new_with_label( "save as..." );
+	GtkWidget* btn_undo  = gtk_button_new_with_label( "undo" );
+	GtkWidget* btn_redo  = gtk_button_new_with_label( "redo" );
 	GtkWidget* btn_play  = gtk_button_new_with_label( "▶ play" );
 	GtkWidget* btn_stop  = gtk_button_new_with_label( "■ stop" );
 	g_signal_connect_swapped( btn_unit,  "clicked", G_CALLBACK( +[]( gpointer ){ _add_unit(); } ), NULL );
@@ -1306,6 +1513,10 @@ static void _activate( GtkApplication* app, gpointer )
 	g_signal_connect_swapped( btn_song,  "clicked", G_CALLBACK( +[]( gpointer ){ _song_dialog(); } ), NULL );
 	g_signal_connect_swapped( btn_play,  "clicked", G_CALLBACK( +[]( gpointer ){ _start_play(); } ), NULL );
 	g_signal_connect_swapped( btn_stop,  "clicked", G_CALLBACK( +[]( gpointer ){ _stop_play(); } ), NULL );
+	g_signal_connect_swapped( btn_new,   "clicked", G_CALLBACK( +[]( gpointer ){ _new_tune(); } ), NULL );
+	g_signal_connect_swapped( btn_saveas,"clicked", G_CALLBACK( +[]( gpointer ){ _save_as_dialog(); } ), NULL );
+	g_signal_connect_swapped( btn_undo,  "clicked", G_CALLBACK( +[]( gpointer ){ _undo(); } ), NULL );
+	g_signal_connect_swapped( btn_redo,  "clicked", G_CALLBACK( +[]( gpointer ){ _redo(); } ), NULL );
 	gtk_box_append( GTK_BOX( hbox ), btn_unit );
 	gtk_box_append( GTK_BOX( hbox ), btn_sound );
 	gtk_box_append( GTK_BOX( hbox ), btn_rename );
@@ -1313,6 +1524,10 @@ static void _activate( GtkApplication* app, gpointer )
 	gtk_box_append( GTK_BOX( hbox ), btn_event );
 	gtk_box_append( GTK_BOX( hbox ), btn_play );
 	gtk_box_append( GTK_BOX( hbox ), btn_stop );
+	gtk_box_append( GTK_BOX( hbox ), btn_new );
+	gtk_box_append( GTK_BOX( hbox ), btn_saveas );
+	gtk_box_append( GTK_BOX( hbox ), btn_undo );
+	gtk_box_append( GTK_BOX( hbox ), btn_redo );
 
 	gtk_box_append( GTK_BOX( hbox ), gtk_label_new( "snap:" ) );
 	g_ed.snap_combo = gtk_drop_down_new_from_strings( (const char*[]){ "1/4", "1/8", "1/16", "1/32", NULL } );
@@ -1426,12 +1641,9 @@ int main( int argc, char** argv )
 		return 1;
 	}
 
-	// separate device for note previews (no callback: we use SDL_QueueAudio)
-	SDL_AudioSpec pv = want;
-	pv.callback = NULL;
-	pv.userdata = NULL;
-	g_ed.preview_dev = SDL_OpenAudioDevice( NULL, 0, &pv, NULL, 0 );
-	if( g_ed.preview_dev ) SDL_PauseAudioDevice( g_ed.preview_dev, 0 ); // devices open PAUSED
+	// run the mixer from startup so note previews work before the first Play
+	SDL_PauseAudio( 0 );
+	g_ed.pv_buf.assign( _SAMPLE_PER_SECOND * _CHANNEL_NUM, 0 ); // 1s preview FIFO
 
 	GtkApplication* app = gtk_application_new( "com.github.pxtone.editor", G_APPLICATION_NON_UNIQUE );
 	g_signal_connect( app, "activate", G_CALLBACK( _activate ), NULL );
@@ -1440,7 +1652,6 @@ int main( int argc, char** argv )
 
 	_stop_play();
 	SDL_CloseAudio();
-	if( g_ed.preview_dev ) SDL_CloseAudioDevice( g_ed.preview_dev );
 	SDL_Quit();
 	return ret;
 }
