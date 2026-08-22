@@ -304,6 +304,17 @@ static void _sdl_audio_callback( void*, Uint8* stream, int len )
 	g_ed.played_samples += len / ( _CHANNEL_NUM * sizeof(int16_t) );
 
 	// mix queued preview samples on top (works before the first Play)
+	// (diagnostic: report output level while playing)
+	if( g_ed.playing )
+	{
+		static int dbg = 0;
+		double pk = 0;
+		const int16_t* s16 = (const int16_t*)stream;
+		for( int i = 0; i < len / (int)sizeof(int16_t); i++ )
+			{ double a = fabs( s16[ i ] / 32768.0 ); if( a > pk ) pk = a; }
+		if( ++dbg >= 86 ){ dbg = 0; fprintf( stderr, "[mixer] peak=%.3f\n", pk ); }
+	}
+
 	int16_t* out = (int16_t*)stream;
 	size_t   frames = len / ( _CHANNEL_NUM * sizeof(int16_t) );
 	size_t   capf   = g_ed.pv_buf.size() / _CHANNEL_NUM; // capacity in frames
