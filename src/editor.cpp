@@ -748,15 +748,16 @@ static void _solo_selected()
 
 static void _refresh_unit_combo()
 {
-	GtkStringList* list = GTK_STRING_LIST( gtk_drop_down_get_model( GTK_DROP_DOWN( g_ed.unit_combo ) ) );
-	guint n = g_list_model_get_n_items( G_LIST_MODEL( list ) );
-	gtk_string_list_splice( list, 0, n, NULL ); // remove all
+	// rebuild the model wholesale (in-place splice did not refresh the dropdown)
+	GtkStringList* list = gtk_string_list_new( NULL );
 	for( int i = 0; i < g_ed.unit_num; i++ )
 	{
 		int32_t size = 0;
 		const char* name = g_ed.pxtn->Unit_Get( i )->get_name_buf( &size );
 		gtk_string_list_append( list, name && name[0] ? name : "(no name)" );
 	}
+	gtk_drop_down_set_model( GTK_DROP_DOWN( g_ed.unit_combo ), G_LIST_MODEL( list ) );
+	g_object_unref( list );
 	if( g_ed.unit_num > 0 ) gtk_drop_down_set_selected( GTK_DROP_DOWN( g_ed.unit_combo ), g_ed.unit_num - 1 );
 }
 
@@ -1109,7 +1110,7 @@ static void _sound_dialog()
 			(int)gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->audkey ) ), -1 );
 	};
 	for( GtkWidget* w : { d->type, d->wave, d->ntype } )
-		g_signal_connect_swapped( w, "notify::selected", G_CALLBACK( +[]( gpointer, gpointer ud ){
+		g_signal_connect( w, "notify::selected", G_CALLBACK( +[]( GObject*, GParamSpec*, gpointer ud ){
 			SoundDlg* dd = (SoundDlg*)ud;
 			gtk_widget_queue_draw( dd->wavecanvas );
 			_audition_sound(
