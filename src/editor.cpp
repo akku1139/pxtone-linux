@@ -133,6 +133,7 @@ static void _fix_overlaps( int32_t clock, int unit, int32_t dur );
 static void Record_Value_Set_safe( pxtnEvelist* ev, int32_t clock, int unit, int32_t dur );
 static void _apply_song( double tempo, int beat_num, int32_t beat_clock,
                          int meas_num, int repeat_meas, int last_meas );
+static void _sync_event_sliders();
 static void _set_event_f( uint8_t kind, int32_t clock, int unit, double value );
 static void _make_harmonic_points( int timbre, pxtnPOINT* pts, int32_t* p_num );
 static void _apply_simple_envelope( pxtnVOICEUNIT* v );
@@ -1153,6 +1154,49 @@ static void _draw_cb( GtkDrawingArea*, cairo_t* cr, int w, int h, gpointer )
 		cairo_rectangle( cr, x0, y + 1, x1 - x0, _ROW_H - 2 ); cairo_fill( cr );
 		cairo_set_source_rgb( cr, r * 0.5, g * 0.5, b * 0.5 );
 		cairo_rectangle( cr, x0, y + 1, x1 - x0, _ROW_H - 2 ); cairo_stroke( cr );
+
+		// velocity bar on the left edge of the note
+		int32_t vel = g_ed.pxtn->evels->get_Value( p->clock, p->unit_no, EVENTKIND_VELOCITY );
+		double vh = ( _ROW_H - 4 ) * ( vel / 129.0 );
+		if( x1 - x0 >= 6 && vh > 1 )
+		{
+			cairo_set_source_rgba( cr, 1, 1, 1, 0.55 );
+			cairo_rectangle( cr, x0 + 1, y + _ROW_H - 2 - vh, 3, vh );
+			cairo_fill( cr );
+		}
+	}
+
+	// markers for unit-level events of the active unit (top edge)
+	{
+		int su = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
+		struct MK { uint8_t kind; double r,g,b; };
+		static const MK mks[] =
+		{
+			{ EVENTKIND_VOLUME,     1.00, 0.80, 0.30 },
+			{ EVENTKIND_PAN_VOLUME, 0.30, 0.90, 0.90 },
+			{ EVENTKIND_PAN_TIME,   0.90, 0.50, 0.90 },
+			{ EVENTKIND_PORTAMENT,  0.60, 0.60, 1.00 },
+			{ EVENTKIND_TUNING,     0.40, 1.00, 0.40 },
+			{ EVENTKIND_VOICENO,    1.00, 1.00, 1.00 },
+			{ EVENTKIND_GROUPNO,    0.80, 0.80, 0.40 },
+		};
+		if( su >= 0 )
+		{
+			for( const EVERECORD* p = g_ed.pxtn->evels->get_Records(); p; p = p->next )
+			{
+				if( p->unit_no != su ) continue;
+				for( auto& m : mks )
+				{
+					if( p->kind != m.kind ) continue;
+					double x = p->clock * g_ed.px_per_clock - g_ed.h_offset;
+					if( x < -4 || x > w + 4 ) continue;
+					cairo_set_source_rgb( cr, m.r, m.g, m.b );
+					cairo_move_to( cr, x, 8 ); cairo_line_to( cr, x - 4, 0 );
+					cairo_line_to( cr, x + 4, 0 ); cairo_close_path( cr );
+					cairo_fill( cr );
+				}
+			}
+		}
 	}
 
 	if( g_ed.playing )
@@ -1615,61 +1659,78 @@ static void _build_units_page( GtkWidget* parent )
 
 // ---- event page ---------------------------------------------------------------
 
-typedef struct { GtkWidget *kindcombo, *value; } EventDlg;
-static EventDlg g_event_dlg;
+// one slider row per event kind
+static GtkWidget* g_ev_scale[16];
 
-
-static void _on_event_kind_changed( GtkDropDown* dd, gpointer user_data )
+static void _on_event_row_set( GtkButton* btn, gpointer )
 {
-	GtkWidget* value = GTK_WIDGET( user_data );
-	int t = (int)gtk_drop_down_get_selected( dd );
-	if( t < 0 || t >= _event_kind_num ) return;
-	gtk_range_set_range( GTK_RANGE( value ), _event_kinds[ t ].min, _event_kinds[ t ].max );
-	gtk_range_set_value( GTK_RANGE( value ), _event_kinds[ t ].def );
-}
-
-static void _on_event_set_clicked( GtkButton*, gpointer user_data )
-{
-	EventDlg* d = (EventDlg*)user_data;
-	int t = (int)gtk_drop_down_get_selected( GTK_DROP_DOWN( d->kindcombo ) );
+	int t = GPOINTER_TO_INT( g_object_get_data( G_OBJECT( btn ), "evidx" ) );
 	if( t < 0 || t >= _event_kind_num ) return;
 	int unit = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
 	int32_t clock = g_ed.has_sel ? g_ed.sel_clock : (int32_t)( g_ed.h_offset / g_ed.px_per_clock );
-	_set_event_f( _event_kinds[ t ].kind, clock, unit,
-		gtk_range_get_value( GTK_RANGE( d->value ) ) );
+	double v;
+	if( _event_kinds[ t ].is_float )
+		v = gtk_spin_button_get_value( GTK_SPIN_BUTTON( g_ev_scale[ t ] ) );
+	else
+		v = gtk_range_get_value( GTK_RANGE( g_ev_scale[ t ] ) );
+	_set_event_f( _event_kinds[ t ].kind, clock, unit, v );
+}
+
+// refresh the event sliders from the currently selected note
+static void _sync_event_sliders()
+{
+	if( !g_ed.has_sel || !g_ed.pxtn ) return;
+	for( int t = 0; t < _event_kind_num; t++ )
+	{
+		const EventKindInfo& ki = _event_kinds[ t ];
+		int32_t raw = g_ed.pxtn->evels->get_Value(
+			g_ed.sel_clock, (uint8_t)g_ed.sel_unit, ki.kind );
+		double v = ki.is_float ? *(float*)( &raw ) : (double)raw;
+		if( v < ki.min || v > ki.max ) v = ki.def;
+		if( ki.is_float )
+			gtk_spin_button_set_value( GTK_SPIN_BUTTON( g_ev_scale[ t ] ), v );
+		else if( GTK_IS_RANGE( g_ev_scale[ t ] ) )
+			gtk_range_set_value( GTK_RANGE( g_ev_scale[ t ] ), v );
+	}
 }
 
 static void _build_event_page( GtkWidget* parent )
 {
-	EventDlg* d = &g_event_dlg;
-
 	GtkWidget* grid = gtk_grid_new();
-	gtk_grid_set_row_spacing( GTK_GRID( grid ), 6 );
-	gtk_grid_set_column_spacing( GTK_GRID( grid ), 8 );
+	gtk_grid_set_row_spacing( GTK_GRID( grid ), 4 );
+	gtk_grid_set_column_spacing( GTK_GRID( grid ), 6 );
 	gtk_widget_set_margin_start( grid, 10 ); gtk_widget_set_margin_end( grid, 10 );
 	gtk_widget_set_margin_top( grid, 10 ); gtk_widget_set_margin_bottom( grid, 10 );
 	gtk_box_append( GTK_BOX( parent ), grid );
 
-	const char* names[ _event_kind_num + 1 ];
-	for( int i = 0; i < _event_kind_num; i++ ) names[ i ] = _event_kinds[ i ].name;
-	names[ _event_kind_num ] = NULL;
+	for( int t = 0; t < _event_kind_num; t++ )
+	{
+		const EventKindInfo& ki = _event_kinds[ t ];
+		gtk_grid_attach( GTK_GRID( grid ), gtk_label_new( ki.name ), 0, t, 1, 1 );
 
-	gtk_grid_attach( GTK_GRID( grid ), gtk_label_new( "kind:" ), 0, 0, 1, 1 );
-	d->kindcombo = gtk_drop_down_new_from_strings( names );
-	gtk_grid_attach( GTK_GRID( grid ), d->kindcombo, 1, 0, 1, 1 );
+		if( ki.is_float )
+		{
+			g_ev_scale[ t ] = gtk_spin_button_new_with_range( ki.min, ki.max, 0.01 );
+			gtk_spin_button_set_value( GTK_SPIN_BUTTON( g_ev_scale[ t ] ), ki.def );
+		}
+		else
+		{
+			g_ev_scale[ t ] = gtk_scale_new_with_range( GTK_ORIENTATION_HORIZONTAL, ki.min, ki.max, 1 );
+			gtk_range_set_value( GTK_RANGE( g_ev_scale[ t ] ), ki.def );
+			gtk_widget_set_hexpand( g_ev_scale[ t ], TRUE );
+		}
+		gtk_grid_attach( GTK_GRID( grid ), g_ev_scale[ t ], 1, t, 1, 1 );
 
-	gtk_grid_attach( GTK_GRID( grid ), gtk_label_new( "value:" ), 0, 1, 1, 1 );
-	d->value = gtk_scale_new_with_range( GTK_ORIENTATION_HORIZONTAL, 0, 129, 1 );
-	gtk_range_set_value( GTK_RANGE( d->value ), EVENTDEFAULT_VELOCITY );
-	gtk_widget_set_hexpand( d->value, TRUE );
-	gtk_grid_attach( GTK_GRID( grid ), d->value, 1, 1, 1, 1 );
-	g_signal_connect( d->kindcombo, "notify::selected", G_CALLBACK( _on_event_kind_changed ), d->value );
+		GtkWidget* btn = gtk_button_new_with_label( "set" );
+		g_object_set_data( G_OBJECT( btn ), "evidx", GINT_TO_POINTER( t ) );
+		g_signal_connect( btn, "clicked", G_CALLBACK( _on_event_row_set ), NULL );
+		gtk_grid_attach( GTK_GRID( grid ), btn, 2, t, 1, 1 );
+	}
 
-	gtk_grid_attach( GTK_GRID( grid ), gtk_label_new( "at: selected note / view start" ), 0, 2, 2, 1 );
-
-	GtkWidget* btn = gtk_button_new_with_label( "set event" );
-	g_signal_connect( btn, "clicked", G_CALLBACK( _on_event_set_clicked ), d );
-	gtk_grid_attach( GTK_GRID( grid ), btn, 0, 3, 2, 1 );
+	GtkWidget* hint = gtk_label_new( "set writes at the selected note (or view start if none)" );
+	gtk_widget_set_halign( hint, GTK_ALIGN_START );
+	gtk_widget_set_opacity( hint, 0.7 );
+	gtk_grid_attach( GTK_GRID( grid ), hint, 0, _event_kind_num, 3, 1 );
 }
 
 // ---- song page ----------------------------------------------------------------
