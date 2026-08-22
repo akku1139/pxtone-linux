@@ -2051,7 +2051,27 @@ static void _build_sound_page( GtkWidget* parent )
 		g_signal_connect( w, "value-changed", G_CALLBACK( +[]( GtkWidget*, gpointer fn ){ ((void(*)())fn)(); } ),
 			(gpointer)live );
 
-	// initial visibility
+	// type change: show only the relevant parameter rows
+	auto upd_vis = +[]( gpointer ud ){
+		SoundDlg* dd = (SoundDlg*)ud;
+		bool ptv = gtk_drop_down_get_selected( GTK_DROP_DOWN( dd->type ) ) == 0;
+		for( int i = 0; i < dd->ptv_n; i++ )
+			gtk_widget_set_visible( dd->ptv_rows[ i ], ptv );
+		for( int i = 0; i < dd->ptn_n; i++ )
+			gtk_widget_set_visible( dd->ptn_rows[ i ], !ptv );
+		gtk_widget_queue_draw( dd->canvas );
+		_snd_live_audition();
+	};
+	g_signal_connect_swapped( d->type, "notify::selected", G_CALLBACK( +[]( gpointer inst, gpointer ud ){
+		GtkDropDown* dd2 = GTK_DROP_DOWN( inst );
+		int sel = gtk_drop_down_get_selected( dd2 );
+		SoundDlg* dd = (SoundDlg*)ud;
+		bool ptv = ( sel == 0 );
+		for( int i = 0; i < dd->ptv_n; i++ ) gtk_widget_set_visible( dd->ptv_rows[ i ], ptv );
+		for( int i = 0; i < dd->ptn_n; i++ ) gtk_widget_set_visible( dd->ptn_rows[ i ], !ptv );
+		gtk_widget_queue_draw( dd->canvas );
+	} ), d );
+
 	gtk_drop_down_set_selected( GTK_DROP_DOWN( d->type ), 0 );
 
 	// buttons
@@ -2518,9 +2538,12 @@ int main( int argc, char** argv )
 	SDL_PauseAudio( 0 );
 	g_ed.pv_buf.assign( _SAMPLE_PER_SECOND * _CHANNEL_NUM, 0 );
 
-	// The Vulkan GSK renderer can leave stale frames on some drivers
-	// (vkAcquireNextImageKHR SUBOPTIMAL spam). Cairo is reliable.
-	g_setenv( "GSK_RENDERER", "cairo", TRUE );
+	// The Vulkan GSK renderer can leave stale frames on some drivers/GTK versions
+	// (vkAcquireNextImageKHR SUBOPTIMAL spam -> UI updates not shown).
+	// Prefer NGL, fall back to Cairo. Override by setting GSK_RENDERER manually
+	// BEFORE launch (in-process g_setenv may lose to an inherited value).
+	if( !g_getenv( "PXE_KEEP_RENDERER" ) )
+		g_setenv( "GSK_RENDERER", g_getenv( "PXE_FORCE_CAIRO" ) ? "cairo" : "ngl", TRUE );
 
 	g_app = gtk_application_new( "com.github.pxtone.editor", G_APPLICATION_NON_UNIQUE );
 	g_signal_connect( g_app, "activate", G_CALLBACK( _activate ), NULL );
