@@ -69,6 +69,7 @@ struct Editor
 	int32_t  drag_clock    = 0;
 	int32_t  drag_unit     = 0;
 	int32_t  drag_orig_clk = 0;
+	int      drag_orig_row = 0;
 	int32_t  drag_cur_clk  = 0;
 	int      drag_cur_row  = 0;
 	int32_t  drag_dur      = 0;
@@ -1266,6 +1267,20 @@ static void _draw_cb( GtkDrawingArea*, cairo_t* cr, int w, int h, gpointer )
 		}
 	}
 
+	// moving: dashed outline at the source position
+	if( moving )
+	{
+		double sx = g_ed.drag_orig_clk * g_ed.px_per_clock - g_ed.h_offset;
+		double sy = ( _ROW_MAX - MIN( MAX( g_ed.drag_orig_row, _ROW_MIN ), _ROW_MAX ) ) * _ROW_H - g_ed.v_offset;
+		cairo_set_source_rgba( cr, 1, 1, 1, 0.45 );
+		static const double dd[2] = { 5, 5 };
+		cairo_set_dash( cr, dd, 2, 0 );
+		cairo_rectangle( cr, sx, sy + 1,
+			MAX( 4.0, g_ed.drag_dur * g_ed.px_per_clock ), _ROW_H - 2 );
+		cairo_stroke( cr );
+		cairo_set_dash( cr, NULL, 0, 0 );
+	}
+
 	// move ghost
 	if( moving )
 	{
@@ -1500,6 +1515,7 @@ static void _on_drag_begin( GtkGestureDrag* gesture, double x, double y, gpointe
 		g_ed.dragging      = true;
 		g_ed.drag_unit     = unit;
 		g_ed.drag_orig_clk = hit->clock;
+		g_ed.drag_orig_row = row;
 		g_ed.drag_cur_clk  = hit->clock;
 		g_ed.drag_cur_row  = row;
 		g_ed.drag_dur      = hit->value > 0 ? hit->value : g_ed.snap;
@@ -1510,6 +1526,7 @@ static void _on_drag_begin( GtkGestureDrag* gesture, double x, double y, gpointe
 		g_ed.sel_row       = g_ed.drag_key;
 		_set_status( "%s: unit=%d clock=%d len=%d", g_ed.mode == DRAG_RESIZE ? "resize" : "move",
 			unit, hit->clock, g_ed.drag_dur );
+		gtk_widget_queue_draw( g_ed.draw_area ); // show outline immediately
 	}
 	else _add_note( clock, row );
 }
@@ -1540,12 +1557,13 @@ static void _apply_move()
 
 static void _on_drag_end( GtkGestureDrag*, double, double, gpointer )
 {
-	if( g_ed.mode == DRAG_MOVE ) _apply_move();
+	if( g_ed.mode == DRAG_MOVE ){ _apply_move(); _set_status( "note moved" ); }
 	else if( g_ed.mode == DRAG_RESIZE )
 	{
 		SDL_LockAudio();
 		_fix_overlaps( g_ed.drag_orig_clk, g_ed.drag_unit, g_ed.drag_dur );
 		SDL_UnlockAudio();
+		_set_status( "note resized (len=%d)", g_ed.drag_dur );
 	}
 	if( g_ed.mode == DRAG_RANGE )
 	{
@@ -2192,6 +2210,34 @@ static void _on_snap_combo_changed( GtkDropDown* dd, gpointer )
 
 static GtkApplication* g_app = NULL;
 
+static void _on_motion_hover( GtkEventControllerMotion*, double x, double y, gpointer )
+{
+	if( !g_ed.pxtn || !g_ed.loaded ) return;
+	const char* cname = "default";
+	if( g_ed.dragging )
+		cname = ( g_ed.mode == DRAG_RESIZE ) ? "ew-resize" : "grabbing";
+	else
+	{
+		int32_t clock; int row;
+		int unit = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
+		if( unit >= 0 && unit < g_ed.unit_num &&
+			_screen_to_clock_row( (int)x, (int)y, &clock, &row ) )
+		{
+			const EVERECORD* hit = _find_note( clock, row, unit );
+			if( hit )
+			{
+				double end_x = ( hit->clock + hit->value ) * g_ed.px_per_clock - g_ed.h_offset;
+				double w     = hit->value * g_ed.px_per_clock;
+				cname = ( w >= 24.0 && x > end_x - 10.0 ) ? "ew-resize" : "grab";
+			}
+			else cname = "crosshair"; // empty cell: note can be placed
+		}
+	}
+	GdkCursor* cur = gdk_cursor_new_from_name( cname, NULL );
+	gtk_widget_set_cursor( g_ed.draw_area, cur );
+	g_object_unref( cur );
+}
+
 static void _activate( GtkApplication*, gpointer )
 {
 	g_ed.window = gtk_application_window_new( g_app );
@@ -2309,6 +2355,10 @@ static void _activate( GtkApplication*, gpointer )
 		if( _screen_to_clock_row( (int)x, (int)y, &clock, &row ) ) _seek_to( clock );
 	} ), NULL );
 	gtk_widget_add_controller( g_ed.draw_area, GTK_EVENT_CONTROLLER( mclick ) );
+
+	GtkEventController* hover = gtk_event_controller_motion_new();
+	g_signal_connect( hover, "motion", G_CALLBACK( _on_motion_hover ), NULL );
+	gtk_widget_add_controller( g_ed.draw_area, GTK_EVENT_CONTROLLER( hover ) );
 
 	GtkEventController* key = gtk_event_controller_key_new();
 	g_signal_connect( key, "key-pressed", G_CALLBACK( _on_key ), NULL );
