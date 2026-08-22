@@ -100,7 +100,7 @@ static Editor g_ed;
 
 static const double PI = 3.141592653589793;
 
-static void _preview_note( int unit, int row ); // fwd
+static void _preview_note( int unit, int row, int32_t clock ); // fwd
 
 // ---- undo/redo (project snapshots) --------------------------------------
 
@@ -352,7 +352,7 @@ static void _add_note( int32_t clock, int row )
 	g_ed.pxtn->evels->Record_Add_i( c, (uint8_t)unit, EVENTKIND_ON, g_ed.snap );
 	SDL_UnlockAudio();
 
-	_preview_note( unit, row );
+	_preview_note( unit, row, c );
 
 	g_ed.dragging   = true;
 	g_ed.drag_clock = c;
@@ -598,10 +598,16 @@ static void _preview_woice( const pxtnWoice* woice, int row )
 	}
 }
 
-static void _preview_note( int unit, int row )
+// Resolve the woice the way Moo does: via the unit's VOICENO event at that
+// point (loaded tunes do not have the woice pointer set on the unit).
+static void _preview_note( int unit, int row, int32_t clock )
 {
 	if( unit < 0 || unit >= g_ed.unit_num ) return;
-	_preview_woice( g_ed.pxtn->Unit_Get( unit )->get_woice(), row );
+	int32_t vno = g_ed.pxtn->evels->get_Value( clock, (uint8_t)unit, EVENTKIND_VOICENO );
+	const pxtnWoice* woice = NULL;
+	if( vno >= 0 && vno < g_ed.pxtn->Woice_Num() ) woice = g_ed.pxtn->Woice_Get( vno );
+	if( !woice && g_ed.pxtn->Woice_Num() > 0 ) woice = g_ed.pxtn->Woice_Get( 0 );
+	_preview_woice( woice, row );
 }
 
 // ---- track (unit) add ---------------------------------------------------
@@ -745,7 +751,7 @@ static void _create_sound( int type, int wave, int volume, int basic_row,
 	if( unit >= 0 && unit < g_ed.unit_num )
 		g_ed.pxtn->Unit_Get_variable( unit )->set_woice( w );
 
-	_preview_note( unit < 0 ? 0 : unit, basic_row );
+	_preview_woice( w, basic_row ); // audition the new sound itself
 	_set_status( "created %s (woice %d)", wname, idx );
 }
 
@@ -758,8 +764,9 @@ static void _audition_sound( int type, int wave, int volume, int basic_row,
 	pxtnWoice* w = g_ed.pxtn->Woice_Get_variable( idx );
 	if( !_build_sound_woice( w, type, wave, volume, basic_row, noise_type, nfreq, noffset, nvol ) )
 		{ g_ed.pxtn->Woice_Remove( idx ); return; }
-	if( g_ed.pxtn->Woice_ReadyTone( idx ) != pxtnOK ){ g_ed.pxtn->Woice_Remove( idx ); return; }
+	if( g_ed.pxtn->Woice_ReadyTone( idx ) != pxtnOK ){ _set_status( "audition: tone ready failed" ); g_ed.pxtn->Woice_Remove( idx ); return; }
 	_preview_woice( w, basic_row ); // render into the FIFO synchronously
+	_set_status( "audition: ok (woice %d, %d frames queued)", idx, (int)g_ed.pv_write - (int)g_ed.pv_read );
 	g_ed.pxtn->Woice_Remove( idx );
 }
 
