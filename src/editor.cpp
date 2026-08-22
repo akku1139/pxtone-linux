@@ -302,7 +302,7 @@ static void _start_play()
 	if( !g_ed.loaded || g_ed.playing ) return;
 
 	pxtnVOMITPREPARATION prep = {0};
-	prep.flags          |= pxtnVOMITPREPFLAG_loop;
+	prep.flags          |= pxtnVOMITPREPFLAG_loop | pxtnVOMITPREPFLAG_unit_mute;
 	prep.start_pos_float = 0;
 	prep.master_volume   = 0.80f;
 	if( !g_ed.pxtn->moo_preparation( &prep ) ){ _set_status( "play preparation failed" ); return; }
@@ -463,6 +463,7 @@ static void _delete_note( int32_t clock, int row )
 }
 
 static void _save_as_dialog(); // fwd
+static void _open_dialog(); // fwd
 
 static void _save()
 {
@@ -474,46 +475,6 @@ static void _save()
 	fclose( fp );
 	if( err != pxtnOK ){ _set_status( "ERROR: %s", pxtnError_get_string( err ) ); return; }
 	_set_status( "saved: %s", g_ed.path.c_str() );
-}
-
-static void _on_save_as_ok( GtkButton*, gpointer user_data )
-{
-	typedef struct { GtkWidget *entry,*dlgwin; } D;
-	D* d = (D*)user_data;
-	const char* text = g_strdup( gtk_editable_get_text( GTK_EDITABLE( d->entry ) ) );
-	gtk_window_destroy( GTK_WINDOW( d->dlgwin ) );
-	if( text && text[0] ) _save_as_path( text );
-	g_free( (gpointer)text );
-	delete d;
-}
-
-static void _save_as_dialog()
-{
-	typedef struct { GtkWidget *entry,*dlgwin; } D;
-	D* d = new D{};
-
-	GtkWidget* win = gtk_window_new();
-	gtk_window_set_title( GTK_WINDOW( win ), "save as" );
-	gtk_window_set_default_size( GTK_WINDOW( win ), 420, 100 );
-	d->dlgwin = win;
-
-	GtkWidget* box = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 6 );
-	gtk_widget_set_margin_start ( box, 10 ); gtk_widget_set_margin_end( box, 10 );
-	gtk_widget_set_margin_top   ( box, 10 ); gtk_widget_set_margin_bottom( box, 10 );
-	gtk_window_set_child( GTK_WINDOW( win ), box );
-
-	gtk_box_append( GTK_BOX( box ), gtk_label_new( "file:" ) );
-	d->entry = gtk_entry_new();
-	if( !g_ed.path.empty() ) gtk_editable_set_text( GTK_EDITABLE( d->entry ), g_ed.path.c_str() );
-	else                     gtk_editable_set_text( GTK_EDITABLE( d->entry ), "untitled.ptcop" );
-	gtk_widget_set_hexpand( d->entry, TRUE );
-	gtk_box_append( GTK_BOX( box ), d->entry );
-
-	GtkWidget* btn = gtk_button_new_with_label( "save" );
-	g_signal_connect( btn, "clicked", G_CALLBACK( _on_save_as_ok ), d );
-	gtk_box_append( GTK_BOX( box ), btn );
-
-	gtk_window_present( GTK_WINDOW( win ) );
 }
 
 static void _refresh_unit_combo(); // fwd
@@ -537,7 +498,103 @@ static void _new_tune()
 	gtk_widget_queue_draw( g_ed.draw_area );
 }
 
-// ---- save as -------------------------------------------------------------
+// ---- open / save-as via native file dialog -------------------------------
+
+static void _open_path( const char* path )
+{
+	SDL_PauseAudio( 1 );
+	SDL_LockAudio();
+
+	pxtnService* p = new pxtnService( _pxtn_r, _pxtn_w, _pxtn_s, _pxtn_p );
+	pxtnERR err = p->init();
+	if( err == pxtnOK && !p->set_destination_quality( _CHANNEL_NUM, _SAMPLE_PER_SECOND ) ) err = pxtnERR_INIT;
+
+	FILE* fp = NULL;
+	if( err == pxtnOK && !( fp = fopen( path, "rb" ) ) ) err = pxtnERR_desc_r;
+	if( err == pxtnOK ){ err = p->read( fp ); fclose( fp ); }
+	if( err == pxtnOK ) err = p->tones_ready();
+
+	if( err != pxtnOK )
+	{
+		delete p;
+		SDL_UnlockAudio();
+		SDL_PauseAudio( 0 );
+		_set_status( "open failed: %s (%s)", path, pxtnError_get_string( err ) );
+		return;
+	}
+
+	delete g_ed.pxtn;
+	g_ed.pxtn = p;
+	g_ed.path = path;
+	_ensure_evels_capacity();
+	g_ed.unit_num = g_ed.pxtn->Unit_Num();
+	g_ed.tempo    = g_ed.pxtn->master->get_beat_tempo();
+	if( g_ed.tempo <= 0 ) g_ed.tempo = EVENTDEFAULT_BEATTEMPO;
+
+	g_undo.clear(); g_redo.clear(); g_clipboard.clear();
+	g_ed.has_sel = false; g_ed.dragging = false; g_ed.mode = DRAG_NONE;
+	g_ed.h_offset = 0; g_ed.v_offset = 0;
+
+	SDL_UnlockAudio();
+	SDL_PauseAudio( 0 );
+
+	_refresh_unit_combo();
+	_set_status( "opened: %s", path );
+	gtk_widget_queue_draw( g_ed.draw_area );
+}
+
+static void _on_open_response( GObject* src, GAsyncResult* res, gpointer )
+{
+	GError* err = NULL;
+	GFile* f = gtk_file_dialog_open_finish( GTK_FILE_DIALOG( src ), res, &err );
+	if( f )
+	{
+		char* path = g_file_get_path( f );
+		if( path ) _open_path( path );
+		g_free( path );
+		g_object_unref( f );
+	}
+	else g_error_free( err );
+}
+
+static void _open_dialog()
+{
+	GtkFileDialog* dlg = gtk_file_dialog_new();
+	gtk_file_dialog_set_title( dlg, "open ptcop" );
+	GtkFileFilter* f = gtk_file_filter_new();
+	gtk_file_filter_set_name( f, "pxtone project (*.ptcop)" );
+	gtk_file_filter_add_pattern( f, "*.ptcop" );
+	GListStore* store = g_list_store_new( GTK_TYPE_FILE_FILTER );
+	g_list_store_append( store, f );
+	gtk_file_dialog_set_filters( dlg, G_LIST_MODEL( store ) );
+	g_object_unref( store );
+	g_object_unref( f );
+	gtk_file_dialog_open( dlg, GTK_WINDOW( g_ed.window ), NULL, _on_open_response, NULL );
+	g_object_unref( dlg );
+}
+
+static void _on_save_response( GObject* src, GAsyncResult* res, gpointer )
+{
+	GError* err = NULL;
+	GFile* f = gtk_file_dialog_save_finish( GTK_FILE_DIALOG( src ), res, &err );
+	if( f )
+	{
+		char* path = g_file_get_path( f );
+		if( path ) _save_as_path( path );
+		g_free( path );
+		g_object_unref( f );
+	}
+	else g_error_free( err );
+}
+
+static void _save_as_dialog()
+{
+	GtkFileDialog* dlg = gtk_file_dialog_new();
+	gtk_file_dialog_set_title( dlg, "save as" );
+	gtk_file_dialog_set_initial_name( dlg, g_ed.path.empty() ? "untitled.ptcop" : g_ed.path.c_str() );
+	gtk_file_dialog_save( dlg, GTK_WINDOW( g_ed.window ), NULL, _on_save_response, NULL );
+	g_object_unref( dlg );
+}
 
 static void _save_as_path( const char* path )
 {
@@ -611,6 +668,32 @@ static void _preview_note( int unit, int row, int32_t clock )
 	if( vno >= 0 && vno < g_ed.pxtn->Woice_Num() ) woice = g_ed.pxtn->Woice_Get( vno );
 	if( !woice && g_ed.pxtn->Woice_Num() > 0 ) woice = g_ed.pxtn->Woice_Get( 0 );
 	_preview_woice( woice, row );
+}
+
+// ---- unit mute / solo ---------------------------------------------------
+
+static void _set_all_played( bool b )
+{
+	for( int i = 0; i < g_ed.unit_num; i++ )
+		g_ed.pxtn->Unit_Get_variable( i )->set_played( b );
+}
+
+static void _mute_selected()
+{
+	int u = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
+	if( u < 0 || u >= g_ed.unit_num ) return;
+	pxtnUnit* un = g_ed.pxtn->Unit_Get_variable( u );
+	un->set_played( !un->get_played() );
+	_set_status( "unit %d %s", u, un->get_played() ? "unmuted" : "MUTED" );
+}
+
+static void _solo_selected()
+{
+	int u = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
+	if( u < 0 || u >= g_ed.unit_num ) return;
+	for( int i = 0; i < g_ed.unit_num; i++ )
+		g_ed.pxtn->Unit_Get_variable( i )->set_played( i == u );
+	_set_status( "solo: unit %d", u );
 }
 
 // ---- track (unit) add ---------------------------------------------------
@@ -1439,18 +1522,27 @@ static void _sync_scrollbars()
 	GtkAllocation alloc;
 	gtk_widget_get_allocation( g_ed.draw_area, &alloc );
 
-	double h_upper = ( g_ed.pxtn ? ( g_ed.pxtn->evels->get_Max_Clock() + 4800 * 8 ) : 4800 * 32 ) * g_ed.px_per_clock;
-	double v_upper = ( _ROW_MAX - _ROW_MIN + 1 ) * (double)_ROW_H;
-
-	double hw = alloc.width > 1 ? alloc.width : 100;
+	double hw = alloc.width  > 1 ? alloc.width  : 100;
 	double vh = alloc.height > 1 ? alloc.height : 100;
 
-	g_object_freeze_notify( G_OBJECT( g_ed.hadj ) );
-	gtk_adjustment_configure( g_ed.hadj, g_ed.h_offset, 0, h_upper + hw * 0.5, 40, hw * 0.8, hw );
-	g_object_thaw_notify( G_OBJECT( g_ed.hadj ) );
-	g_object_freeze_notify( G_OBJECT( g_ed.vadj ) );
-	gtk_adjustment_configure( g_ed.vadj, g_ed.v_offset, 0, v_upper, 40, vh * 0.8, vh );
-	g_object_thaw_notify( G_OBJECT( g_ed.vadj ) );
+	double h_up = ( g_ed.pxtn ? ( g_ed.pxtn->evels->get_Max_Clock() + 4800 * 8 ) : 4800 * 32 ) * g_ed.px_per_clock + hw;
+	double v_up = ( _ROW_MAX - _ROW_MIN + 1 ) * (double)_ROW_H;
+
+	GtkAdjustment* adjs[2] = { g_ed.hadj, g_ed.vadj };
+	double vals [2] = { g_ed.h_offset, g_ed.v_offset };
+	double uppers[2] = { h_up, v_up };
+	double pages [2] = { hw, MIN( vh, v_up ) }; // page never exceeds range
+
+	for( int i = 0; i < 2; i++ )
+	{
+		GtkAdjustment* a = adjs[ i ];
+		if( fabs( gtk_adjustment_get_upper   ( a ) - uppers[ i ] ) > 0.5 ||
+			fabs( gtk_adjustment_get_page_size( a ) - pages[ i ] ) > 0.5 ||
+			fabs( gtk_adjustment_get_value    ( a ) - vals[ i ]   ) > 0.5 )
+		{
+			gtk_adjustment_configure( a, vals[ i ], 0, uppers[ i ], 40, pages[ i ] * 0.9, pages[ i ] );
+		}
+	}
 }
 
 static void _on_hscroll( GtkAdjustment* adj, gpointer )
@@ -1528,8 +1620,11 @@ static void _activate( GtkApplication* app, gpointer )
 	GtkWidget* btn_sound = gtk_button_new_with_label( "sound..." );
 	GtkWidget* btn_event = gtk_button_new_with_label( "event..." );
 	GtkWidget* btn_rename= gtk_button_new_with_label( "rename" );
+	GtkWidget* btn_mute  = gtk_button_new_with_label( "mute" );
+	GtkWidget* btn_solo  = gtk_button_new_with_label( "solo" );
 	GtkWidget* btn_song  = gtk_button_new_with_label( "song..." );
 	GtkWidget* btn_new   = gtk_button_new_with_label( "new" );
+	GtkWidget* btn_open  = gtk_button_new_with_label( "open..." );
 	GtkWidget* btn_saveas= gtk_button_new_with_label( "save as..." );
 	GtkWidget* btn_undo  = gtk_button_new_with_label( "undo" );
 	GtkWidget* btn_redo  = gtk_button_new_with_label( "redo" );
@@ -1539,21 +1634,27 @@ static void _activate( GtkApplication* app, gpointer )
 	g_signal_connect_swapped( btn_sound, "clicked", G_CALLBACK( +[]( gpointer ){ _sound_dialog(); } ), NULL );
 	g_signal_connect_swapped( btn_event, "clicked", G_CALLBACK( +[]( gpointer ){ _event_dialog(); } ), NULL );
 	g_signal_connect_swapped( btn_rename,"clicked", G_CALLBACK( +[]( gpointer ){ _rename_dialog(); } ), NULL );
+	g_signal_connect_swapped( btn_mute,  "clicked", G_CALLBACK( +[]( gpointer ){ _mute_selected(); } ), NULL );
+	g_signal_connect_swapped( btn_solo,  "clicked", G_CALLBACK( +[]( gpointer ){ _solo_selected(); } ), NULL );
 	g_signal_connect_swapped( btn_song,  "clicked", G_CALLBACK( +[]( gpointer ){ _song_dialog(); } ), NULL );
 	g_signal_connect_swapped( btn_play,  "clicked", G_CALLBACK( +[]( gpointer ){ _start_play(); } ), NULL );
 	g_signal_connect_swapped( btn_stop,  "clicked", G_CALLBACK( +[]( gpointer ){ _stop_play(); } ), NULL );
 	g_signal_connect_swapped( btn_new,   "clicked", G_CALLBACK( +[]( gpointer ){ _new_tune(); } ), NULL );
+	g_signal_connect_swapped( btn_open,  "clicked", G_CALLBACK( +[]( gpointer ){ _open_dialog(); } ), NULL );
 	g_signal_connect_swapped( btn_saveas,"clicked", G_CALLBACK( +[]( gpointer ){ _save_as_dialog(); } ), NULL );
 	g_signal_connect_swapped( btn_undo,  "clicked", G_CALLBACK( +[]( gpointer ){ _undo(); } ), NULL );
 	g_signal_connect_swapped( btn_redo,  "clicked", G_CALLBACK( +[]( gpointer ){ _redo(); } ), NULL );
 	gtk_box_append( GTK_BOX( hbox ), btn_unit );
 	gtk_box_append( GTK_BOX( hbox ), btn_sound );
 	gtk_box_append( GTK_BOX( hbox ), btn_rename );
+	gtk_box_append( GTK_BOX( hbox ), btn_mute );
+	gtk_box_append( GTK_BOX( hbox ), btn_solo );
 	gtk_box_append( GTK_BOX( hbox ), btn_song );
 	gtk_box_append( GTK_BOX( hbox ), btn_event );
 	gtk_box_append( GTK_BOX( hbox ), btn_play );
 	gtk_box_append( GTK_BOX( hbox ), btn_stop );
 	gtk_box_append( GTK_BOX( hbox ), btn_new );
+	gtk_box_append( GTK_BOX( hbox ), btn_open );
 	gtk_box_append( GTK_BOX( hbox ), btn_saveas );
 	gtk_box_append( GTK_BOX( hbox ), btn_undo );
 	gtk_box_append( GTK_BOX( hbox ), btn_redo );
