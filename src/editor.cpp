@@ -2147,6 +2147,7 @@ static void _build_units_page( GtkWidget* parent )
 		int i = gtk_list_box_row_get_index( row );
 		if( i >= 0 && i < g_ed.unit_num )
 			gtk_drop_down_set_selected( GTK_DROP_DOWN( g_ed.unit_combo ), i );
+		gtk_widget_queue_draw( g_ed.draw_area );
 	} ), NULL );
 	gtk_scrolled_window_set_child( GTK_SCROLLED_WINDOW( sw ), g_ed.units_list );
 
