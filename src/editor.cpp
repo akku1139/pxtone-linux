@@ -1728,12 +1728,12 @@ static void _activate( GtkApplication*, gpointer )
 	gtk_window_set_title( GTK_WINDOW( g_ed.window ), "pxtone-editor" );
 	gtk_window_set_default_size( GTK_WINDOW( g_ed.window ), 1280, 760 );
 
-	GtkWidget* root = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 0 );
+	GtkWidget* root = gtk_paned_new( GTK_ORIENTATION_HORIZONTAL );
 	gtk_window_set_child( GTK_WINDOW( g_ed.window ), root );
 
 	GtkWidget* vbox = gtk_box_new( GTK_ORIENTATION_VERTICAL, 0 );
 	gtk_widget_set_hexpand( vbox, TRUE );
-	gtk_box_append( GTK_BOX( root ), vbox );
+	gtk_paned_set_start_child( GTK_PANED( root ), vbox );
 
 	// header
 	GtkWidget* header = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 6 );
@@ -1753,6 +1753,7 @@ static void _activate( GtkApplication*, gpointer )
 		gtk_string_list_append( unit_list, name && name[0] ? name : "(no name)" );
 	}
 	g_ed.unit_combo = gtk_drop_down_new( G_LIST_MODEL( unit_list ), NULL );
+	gtk_widget_set_size_request( g_ed.unit_combo, 150, -1 );
 	gtk_box_append( GTK_BOX( header ), g_ed.unit_combo );
 
 	GtkWidget* btn_new   = gtk_button_new_with_label( "new file" );
@@ -1825,7 +1826,7 @@ static void _activate( GtkApplication*, gpointer )
 
 	// right panel notebook
 	g_ed.notebook = gtk_notebook_new();
-	gtk_widget_set_size_request( g_ed.notebook, 320, -1 );
+	gtk_widget_set_size_request( g_ed.notebook, 260, -1 );
 	const char* tabs[] = { "sound", "units", "event", "song" };
 	GtkWidget* page_box[4];
 	for( int i = 0; i < 4; i++ )
@@ -1837,7 +1838,10 @@ static void _activate( GtkApplication*, gpointer )
 	_build_units_page( page_box[1] );
 	_build_event_page( page_box[2] );
 	_build_song_page ( page_box[3] );
-	gtk_box_append( GTK_BOX( root ), g_ed.notebook );
+	gtk_paned_set_end_child( GTK_PANED( root ), g_ed.notebook );
+	gtk_paned_set_resize_end_child( GTK_PANED( root ), FALSE );
+	gtk_paned_set_shrink_end_child( GTK_PANED( root ), FALSE );
+	gtk_paned_set_position( GTK_PANED( root ), 940 ); // default split; draggable
 
 	g_tick_id = g_timeout_add( 33, _tick, NULL );
 	g_signal_connect( g_ed.window, "destroy", G_CALLBACK( _on_window_destroy ), NULL );
