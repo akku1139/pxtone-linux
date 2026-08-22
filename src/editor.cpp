@@ -677,6 +677,7 @@ static void _build_units_page( GtkWidget* parent )
 
 	gtk_box_append( GTK_BOX( parent ), vbox );
 	_units_refresh();
+	fprintf( stderr, "[panel] built units page\n" );
 }
 
 // ---- new tune ------------------------------------------------------------
@@ -1255,6 +1256,7 @@ static void _build_song_page( GtkWidget* parent )
 	gtk_widget_set_margin_start ( grid, 10 ); gtk_widget_set_margin_end  ( grid, 10 );
 	gtk_widget_set_margin_top   ( grid, 10 ); gtk_widget_set_margin_bottom( grid, 10 );
 	gtk_box_append( GTK_BOX( parent ), grid );
+	fprintf( stderr, "[panel] built sound page\n" );
 }
 
 static void _build_sound_page( GtkWidget* parent )
@@ -1375,6 +1377,7 @@ static void _build_sound_page( GtkWidget* parent )
 	gtk_widget_set_margin_start ( grid, 10 ); gtk_widget_set_margin_end  ( grid, 10 );
 	gtk_widget_set_margin_top   ( grid, 10 ); gtk_widget_set_margin_bottom( grid, 10 );
 	gtk_box_append( GTK_BOX( parent ), grid );
+	fprintf( stderr, "[panel] built units page\n" );
 }
 
 // ---- event editing (VELOCITY / VOLUME / PAN_VOLUME / PAN_TIME) ----------
@@ -1481,6 +1484,7 @@ static void _build_event_page( GtkWidget* parent )
 	gtk_grid_attach( GTK_GRID( grid ), btn, 0, 3, 2, 1 );
 
 	gtk_box_append( GTK_BOX( parent ), grid );
+	fprintf( stderr, "[panel] built event page\n" );
 }
 
 // ---- unit rename (inline in units page) ----------------------------------
@@ -1719,6 +1723,18 @@ static void _activate( GtkApplication* app, gpointer )
 	_build_units_page( _page_child( 1 ) );
 	_build_event_page( _page_child( 2 ) );
 	_build_song_page ( _page_child( 3 ) );
+	for( int i = 0; i < 4; i++ )
+	{
+		int n = 0;
+		for( GtkWidget* c = gtk_widget_get_first_child( g_page_children[ i ] );
+		     c; c = gtk_widget_get_next_sibling( c ) ) n++;
+		fprintf( stderr, "[panel] page %d (%s): %d direct children\n",
+			i, names[ i ], n );
+	}
+	fprintf( stderr, "[panel] notebook pages=%d visible=%d mapped=%d\n",
+		gtk_notebook_get_n_pages( GTK_NOTEBOOK( g_ed.notebook ) ),
+		gtk_widget_get_visible( g_ed.notebook ) ? 1 : 0,
+		gtk_widget_get_mapped( g_ed.notebook ) ? 1 : 0 );
 	gtk_box_append( GTK_BOX( root ), g_ed.notebook );
 
 	g_tick_id = g_timeout_add( 33, _tick, NULL );
