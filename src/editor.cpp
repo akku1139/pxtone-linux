@@ -1630,6 +1630,7 @@ static void _apply_move()
 
 	SDL_LockAudio();
 	for( auto& t : ins ) _fix_overlaps( t.clock, g_ed.drag_unit, t.dur );
+	for( auto& t : ins ) Record_Value_Set_safe( ev, t.clock, g_ed.drag_unit, t.dur );
 	SDL_UnlockAudio();
 }
 
@@ -1640,8 +1641,19 @@ static void _finish_drag()
 	{
 		SDL_LockAudio();
 		_fix_overlaps( g_ed.drag_orig_clk, g_ed.drag_unit, g_ed.drag_dur );
+		// Record_Delete/_fix_overlaps can truncate tails crossing the edited
+		// span (pxtone semantics); reassert the edited note's final length
+		Record_Value_Set_safe( g_ed.pxtn->evels, g_ed.drag_orig_clk, g_ed.drag_unit, g_ed.drag_dur );
 		SDL_UnlockAudio();
 		_set_status( "note resized (len=%d)", g_ed.drag_dur );
+	}
+	else if( g_ed.mode == DRAG_STRETCH )
+	{
+		SDL_LockAudio();
+		_fix_overlaps( g_ed.drag_clock, g_ed.drag_unit, g_ed.drag_dur );
+		Record_Value_Set_safe( g_ed.pxtn->evels, g_ed.drag_clock, g_ed.drag_unit, g_ed.drag_dur );
+		SDL_UnlockAudio();
+		_set_status( "note stretched (len=%d)", g_ed.drag_dur );
 	}
 	if( g_ed.mode == DRAG_RANGE )
 	{
