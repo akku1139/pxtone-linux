@@ -1114,7 +1114,9 @@ static bool _build_sound_woice( pxtnWoice* w, int type, int wave, int volume, in
 	{
 		v->type      = pxtnVOICE_Overtone;
 		v->basic_key = basic_row << 8;
-		v->volume    = volume;
+		// engine scales wave by volume/128/128; multiply by 128 to get
+		// a usable amplitude (slider 100 -> engine 12800 -> ~full scale)
+		v->volume    = volume * 128 > 16000 ? 16000 : volume * 128;
 		v->pan       = 64;
 		v->tuning    = 1.0f;
 		v->voice_flags = PTV_VOICEFLAG_SMOOTH | PTV_VOICEFLAG_WAVELOOP;
