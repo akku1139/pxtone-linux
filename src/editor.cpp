@@ -156,12 +156,14 @@ static void _push_undo()
 // during playback).
 static void _restore_safely( const SongSnap& s )
 {
-	bool was_playing = g_ed.playing;
-	SDL_PauseAudio( 1 );   // stop the mixer before freeing/rebuilding events
+	// stop the mixer before freeing/rebuilding events, then ALWAYS resume:
+	// the callback outputs silence when not playing, and a paused mixer
+	// would silently kill note previews until the next Play.
+	SDL_PauseAudio( 1 );
 	SDL_LockAudio();
 	_restore_snapshot( s );
 	SDL_UnlockAudio();
-	if( was_playing ) SDL_PauseAudio( 0 );
+	SDL_PauseAudio( 0 );
 }
 
 static void _undo()
@@ -527,6 +529,7 @@ static void _new_tune()
 	SDL_LockAudio();
 	bool ok = _init_new_project();
 	SDL_UnlockAudio();
+	SDL_PauseAudio( 0 ); // keep the mixer running for previews
 	if( !ok ) return;
 
 	_refresh_unit_combo();
