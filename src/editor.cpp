@@ -47,7 +47,7 @@ static bool _pxtn_p( void* u, int32_t* o )
 	return true;
 }
 
-enum DragMode { DRAG_NONE = 0, DRAG_STRETCH, DRAG_RESIZE, DRAG_MOVE, DRAG_RANGE };
+enum DragMode { DRAG_NONE = 0, DRAG_STRETCH, DRAG_RESIZE, DRAG_MOVE, DRAG_RANGE, DRAG_REPEAT, DRAG_LAST };
 
 struct Editor
 {
@@ -143,11 +143,15 @@ static void _add_unit();
 static void _preview_note( int unit, int row, int32_t clock, int dur_frames = -1 );
 static void _preview_woice( const pxtnWoice* woice, int row, int dur_frames_arg );
 static void _seek_to( int32_t clock );
+static void _set_repeat_at( int32_t clock );
+static void _set_last_at( int32_t clock );
 static void _on_snap_combo_changed( GtkDropDown* dd, gpointer ); // fwd
 
 static void _start_play();
 static void _stop_play();
 static void _seek_to( int32_t clock );
+static void _set_repeat_at( int32_t clock );
+static void _set_last_at( int32_t clock );
 static void _save();
 static void _save_as_dialog();
 static void _delete_unit( int idx );
@@ -168,6 +172,9 @@ static void _build_event_page( GtkWidget* parent );
 static void _build_song_page( GtkWidget* parent );
 
 // ---- undo / redo snapshots -----------------------------------------------
+
+typedef struct { GtkWidget *tempo,*beat_num,*beat_clock,*meas,*repeat,*last; } SongDlg;
+static SongDlg g_song_dlg;
 
 struct SongSnap
 {
@@ -436,6 +443,8 @@ static void _sdl_audio_callback( void*, Uint8* stream, int len )
 }
 
 static void _seek_to( int32_t clock );
+static void _set_repeat_at( int32_t clock );
+static void _set_last_at( int32_t clock );
 
 static void _start_play()
 {
@@ -839,6 +848,12 @@ static void _drag_update( int x, int y )
 	int32_t max = ev->get_Max_Clock() + g_ed.snap * 64;
 	if( c < 0 ) c = 0;
 
+	if( g_ed.mode == DRAG_REPEAT || g_ed.mode == DRAG_LAST )
+	{
+		if( g_ed.mode == DRAG_REPEAT ) _set_repeat_at( c ); else _set_last_at( c );
+		return;
+	}
+
 	if( g_ed.mode == DRAG_RANGE )
 	{
 		int32_t clock2; int row2;
@@ -1166,6 +1181,57 @@ static void _apply_song( double tempo, int beat_num, int32_t beat_clock,
 
 // ---- coordinate helpers -----------------------------------------------------
 
+static int32_t _meas_clock()
+{
+	pxtnMaster* m = g_ed.pxtn->master;
+	int32_t bc = m->get_beat_clock();
+	if( bc <= 0 ) bc = _BEAT_CLOCK;
+	return bc * m->get_beat_num();
+}
+
+// ---- loop marker editing ----------------------------------------------------
+
+static double _repeat_marker_x()
+{
+	int32_t mc = _meas_clock(); if( mc <= 0 ) mc = 1;
+	return g_ed.pxtn->master->get_repeat_meas() * mc * g_ed.px_per_clock - g_ed.h_offset;
+}
+static double _last_marker_x()
+{
+	int32_t mc = _meas_clock(); if( mc <= 0 ) mc = 1;
+	return ( g_ed.pxtn->master->get_last_meas() + 1 ) * mc * g_ed.px_per_clock - g_ed.h_offset;
+}
+
+static void _set_repeat_at( int32_t clock )
+{
+	int32_t mc = _meas_clock(); if( mc <= 0 ) mc = 1;
+	SDL_LockAudio();
+	_push_undo();
+	g_ed.pxtn->master->set_repeat_meas( clock / mc );
+	g_ed.tempo = g_ed.pxtn->master->get_beat_tempo();
+	SDL_UnlockAudio();
+	if( GTK_IS_SPIN_BUTTON( g_song_dlg.repeat ) )
+		gtk_spin_button_set_value( GTK_SPIN_BUTTON( g_song_dlg.repeat ), clock / mc + 1 );
+	_set_status( "repeat measure: %d", clock / mc );
+	gtk_widget_queue_draw( g_ed.draw_area );
+}
+static void _set_last_at( int32_t clock )
+{
+	int32_t mc = _meas_clock(); if( mc <= 0 ) mc = 1;
+	int32_t lm = clock / mc - 1; if( lm < 0 ) lm = 0;
+	SDL_LockAudio();
+	_push_undo();
+	g_ed.pxtn->master->set_last_meas( lm );
+	g_ed.pxtn->master->set_meas_num( lm + 1 );
+	SDL_UnlockAudio();
+	if( GTK_IS_SPIN_BUTTON( g_song_dlg.last ) )
+		gtk_spin_button_set_value( GTK_SPIN_BUTTON( g_song_dlg.last ), lm + 1 );
+	if( GTK_IS_SPIN_BUTTON( g_song_dlg.meas ) )
+		gtk_spin_button_set_value( GTK_SPIN_BUTTON( g_song_dlg.meas ), lm + 1 );
+	_set_status( "last measure end: %d", lm + 1 );
+	gtk_widget_queue_draw( g_ed.draw_area );
+}
+
 static bool _screen_to_clock_row( int x, int y, int32_t* p_clock, int* p_row )
 {
 	int32_t clock = (int32_t)( ( g_ed.h_offset + x ) / g_ed.px_per_clock );
@@ -1228,13 +1294,24 @@ static void _draw_cb( GtkDrawingArea*, cairo_t* cr, int w, int h, gpointer )
 
 		int32_t rm = g_ed.pxtn->master->get_repeat_meas();
 		int32_t lm = g_ed.pxtn->master->get_last_meas();
-		if( rm >= 0 ){ double x = rm * meas_clock * g_ed.px_per_clock - g_ed.h_offset;
-			cairo_set_source_rgb( cr, 0.2, 0.9, 0.3 ); cairo_set_line_width( cr, 2 );
-			cairo_move_to( cr, x, 0 ); cairo_line_to( cr, x, content_h ); cairo_stroke( cr ); }
-		if( lm >= 0 ){ double x = ( lm + 1 ) * meas_clock * g_ed.px_per_clock - g_ed.h_offset;
-			cairo_set_source_rgb( cr, 0.95, 0.25, 0.25 ); cairo_set_line_width( cr, 2 );
-			cairo_move_to( cr, x, 0 ); cairo_line_to( cr, x, content_h ); cairo_stroke( cr ); }
+		auto handle = [&]( double x, double r2, double g2, double b2 ){
+			cairo_set_source_rgb( cr, r2, g2, b2 );
+			cairo_set_line_width( cr, 2 );
+			cairo_move_to( cr, x, 0 ); cairo_line_to( cr, x, content_h ); cairo_stroke( cr );
+			cairo_set_source_rgb( cr, 1 - r2 * 0.6, 1 - g2 * 0.4, 1 - b2 * 0.6 );
+			cairo_rectangle( cr, x - 5, 0, 10, 10 ); cairo_fill( cr );
+			cairo_set_line_width( cr, 1.0 );
+		};
+		if( rm >= 0 ) handle( rm * meas_clock * g_ed.px_per_clock - g_ed.h_offset, 0.2, 0.9, 0.3 );
+		if( lm >= 0 ) handle( ( lm + 1 ) * meas_clock * g_ed.px_per_clock - g_ed.h_offset, 0.95, 0.25, 0.25 );
 		cairo_set_line_width( cr, 1.0 );
+
+		static bool hint_shown = false;
+		if( !hint_shown && g_ed.loaded )
+		{
+			hint_shown = true;
+			_set_status( "Alt+click: repeat / Alt+Shift+click: last / drag the top handles" );
+		}
 	}
 
 	bool moving = ( g_ed.mode == DRAG_MOVE && g_ed.dragging );
@@ -1517,6 +1594,25 @@ static void _on_drag_begin( GtkGestureDrag* gesture, double x, double y, gpointe
 	int unit = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
 	if( unit < 0 || unit >= g_ed.unit_num ) return;
 
+	bool alt = ( mod & GDK_ALT_MASK ) != 0;
+
+	// loop markers: grab an existing line, or create with Alt(+Shift)+click
+	double rx = _repeat_marker_x();
+	double lx = _last_marker_x();
+	if( !alt && fabs( x - rx ) < 6.0 && g_ed.pxtn->master->get_repeat_meas() >= 0 )
+	{ g_ed.mode = DRAG_REPEAT; g_ed.dragging = true; _push_undo(); _set_status( "dragging repeat marker" ); return; }
+	if( !alt && fabs( x - lx ) < 6.0 && g_ed.pxtn->master->get_last_meas() >= 0 )
+	{ g_ed.mode = DRAG_LAST;   g_ed.dragging = true; _push_undo(); _set_status( "dragging last marker" ); return; }
+	if( alt )
+	{
+		int32_t sc = _snap_clock( clock );
+		if( mod & GDK_SHIFT_MASK ) _set_last_at( sc );
+		else                       _set_repeat_at( sc );
+		g_ed.mode     = DRAG_NONE;
+		g_ed.dragging = false;
+		return;
+	}
+
 	if( mod & GDK_SHIFT_MASK )
 	{
 		const EVERECORD* hit = _find_note( clock, row, unit );
@@ -1617,6 +1713,7 @@ static void _on_drag_update( GtkGestureDrag* gesture, double, double, gpointer )
 	gtk_gesture_get_point( GTK_GESTURE( gesture ), NULL, &x, &y );
 	_drag_update( (int)x, (int)y );
 }
+
 
 static void _apply_move()
 {
@@ -2274,8 +2371,6 @@ static void _build_event_page( GtkWidget* parent )
 
 // ---- song page ----------------------------------------------------------------
 
-typedef struct { GtkWidget *tempo,*beat_num,*beat_clock,*meas,*repeat,*last; } SongDlg;
-static SongDlg g_song_dlg;
 
 static void _on_song_apply( GtkButton*, gpointer user_data )
 {
