@@ -125,7 +125,7 @@ static void _on_toggle_dialog( GtkToggleButton* btn, gpointer data )
 	else if( *slot ) gtk_window_destroy( GTK_WINDOW( *slot ) );
 }
 
-static void _preview_note( int unit, int row, int32_t clock ); // fwd
+static void _preview_note( int unit, int row, int32_t clock, int dur_frames = -1 ); // fwd
 
 // ---- dialog window <-> toggle button binding ----------------------------
 
@@ -654,12 +654,12 @@ static void _save_as_path( const char* path )
 
 // Render ~0.35s of the woice pitched to the key row into the preview FIFO
 // (mixed into the main audio callback).
-static void _preview_woice( const pxtnWoice* woice, int row )
+static void _preview_woice( const pxtnWoice* woice, int row, int dur_frames_arg = -1 )
 {
 	if( !woice ) return;
 
 	const int32_t SPSEC = _SAMPLE_PER_SECOND;
-	const int dur_frames = SPSEC * 35 / 100; // 0.35s
+	const int dur_frames = dur_frames_arg > 0 ? dur_frames_arg : SPSEC * 35 / 100;
 
 	std::vector<float> buf( dur_frames * 2, 0.0f );
 
@@ -708,14 +708,14 @@ static void _preview_woice( const pxtnWoice* woice, int row )
 
 // Resolve the woice the way Moo does: via the unit's VOICENO event at that
 // point (loaded tunes do not have the woice pointer set on the unit).
-static void _preview_note( int unit, int row, int32_t clock )
+static void _preview_note( int unit, int row, int32_t clock, int dur_frames )
 {
 	if( unit < 0 || unit >= g_ed.unit_num ) return;
 	int32_t vno = g_ed.pxtn->evels->get_Value( clock, (uint8_t)unit, EVENTKIND_VOICENO );
 	const pxtnWoice* woice = NULL;
 	if( vno >= 0 && vno < g_ed.pxtn->Woice_Num() ) woice = g_ed.pxtn->Woice_Get( vno );
 	if( !woice && g_ed.pxtn->Woice_Num() > 0 ) woice = g_ed.pxtn->Woice_Get( 0 );
-	_preview_woice( woice, row );
+	_preview_woice( woice, row, dur_frames );
 }
 
 // ---- unit mute / solo ---------------------------------------------------
@@ -818,6 +818,21 @@ static void _make_wave_points( int type, pxtnPOINT* pts, int32_t* p_num )
 	}
 }
 
+// Simple A/D/S/R envelope (fps=60): fast attack, gentle decay, 100ms release.
+// Without this, raw PTV playback starts/stops abruptly and sounds like a click.
+static void _apply_simple_envelope( pxtnVOICEUNIT* v )
+{
+	v->data_flags |= PTV_DATAFLAG_ENVELOPE;
+	pxtnVOICEENVELOPE& e = v->envelope;
+	e.fps      = 60;
+	e.head_num = 3; e.body_num = 0; e.tail_num = 1;
+	e.points   = (pxtnPOINT*)malloc( sizeof( pxtnPOINT ) * 4 );
+	e.points[0] = {  1, 128 };  // attack  ~17ms to full
+	e.points[1] = { 12,  90 };  // decay   to ~70% by 200ms
+	e.points[2] = { 36,  70 };  // sustain until 600ms
+	e.points[3] = {  6,   0 };  // release 100ms
+}
+
 // Build a PTV/PTN voice into a freshly allocated woice. Returns false on error.
 static bool _build_sound_woice( pxtnWoice* w, int type, int wave, int volume, int basic_row,
                                 int noise_type, double nfreq, double noffset, double nvol )
@@ -860,7 +875,44 @@ static bool _build_sound_woice( pxtnWoice* w, int type, int wave, int volume, in
 		v->volume    = volume;
 		v->pan       = 64;
 	}
+	_apply_simple_envelope( v );
 	return true;
+}
+
+typedef struct {
+	GtkWidget *type, *wave, *volume, *basic_row, *ntype, *nfreq, *noffset, *nvol, *dlgwin;
+	GtkWidget *audkey, *aurlen, *wavecanvas;
+} SoundDlg;
+
+// waveform preview of the selected PTV wave
+static void _wave_canvas_cb( GtkDrawingArea*, cairo_t* cr, int w, int h, gpointer ud )
+{
+	SoundDlg* d = (SoundDlg*)ud;
+	cairo_set_source_rgb( cr, 0.08, 0.08, 0.12 );
+	cairo_paint( cr );
+
+	int sel = (int)gtk_drop_down_get_selected( GTK_DROP_DOWN( d->wave ) );
+	if( sel < 0 ) return;
+	if( gtk_drop_down_get_selected( GTK_DROP_DOWN( d->type ) ) != 0 )
+	{
+		cairo_set_source_rgb( cr, 0.6, 0.6, 0.7 );
+		cairo_move_to( cr, 4, h / 2 ); cairo_line_to( cr, w - 4, h / 2 ); cairo_stroke( cr );
+		return;
+	}
+
+	pxtnPOINT pts[ 32 ]; int32_t n = 0;
+	_make_wave_points( sel, pts, &n );
+
+	cairo_set_source_rgb( cr, 0.35, 0.85, 1.0 );
+	cairo_set_line_width( cr, 2 );
+	for( int i = 0; i <= n; i++ )
+	{
+		const pxtnPOINT& pt = pts[ i % n ];
+		double x = 4 + ( w - 8 ) * pt.x / 10000.0;
+		double y = h / 2 - h * 0.4 * pt.y / 128.0;
+		if( i == 0 ) cairo_move_to( cr, x, y ); else cairo_line_to( cr, x, y );
+	}
+	cairo_stroke( cr );
 }
 
 static void _create_sound( int type, int wave, int volume, int basic_row,
@@ -891,7 +943,8 @@ static void _create_sound( int type, int wave, int volume, int basic_row,
 
 // build a temporary woice, audition it, then remove it (nothing is saved)
 static void _audition_sound( int type, int wave, int volume, int basic_row,
-                             int noise_type, double nfreq, double noffset, double nvol )
+                             int noise_type, double nfreq, double noffset, double nvol,
+                             int aud_row, int dur_frames )
 {
 	int idx = g_ed.pxtn->Woice_AddNew();
 	if( idx < 0 ){ _set_status( "woice max reached" ); return; }
@@ -899,16 +952,16 @@ static void _audition_sound( int type, int wave, int volume, int basic_row,
 	if( !_build_sound_woice( w, type, wave, volume, basic_row, noise_type, nfreq, noffset, nvol ) )
 		{ g_ed.pxtn->Woice_Remove( idx ); return; }
 	if( g_ed.pxtn->Woice_ReadyTone( idx ) != pxtnOK ){ _set_status( "audition: tone ready failed" ); g_ed.pxtn->Woice_Remove( idx ); return; }
-	_preview_woice( w, basic_row ); // render into the FIFO synchronously
-	_set_status( "audition: ok (woice %d, %d frames queued)", idx, (int)g_ed.pv_write - (int)g_ed.pv_read );
+	int frames = dur_frames > 0 ? dur_frames : -1;
+	_preview_woice( w, aud_row, frames ); // render into the FIFO synchronously
+	_set_status( "audition: ok (%d frames queued)", (int)( g_ed.pv_write - g_ed.pv_read ) );
 	g_ed.pxtn->Woice_Remove( idx );
 }
 
 static void _on_audition_clicked( GtkButton*, gpointer user_data )
 {
-	struct Dlg {
-		GtkWidget *type, *wave, *volume, *basic_row, *ntype, *nfreq, *noffset, *nvol, *dlgwin;
-	} *d = (Dlg*)user_data;
+	SoundDlg* d = (SoundDlg*)user_data;
+	int dur_sec_pct = (int)gtk_range_get_value( GTK_RANGE( d->aurlen ) ); // 5..200 (% of 0.35s)
 	_audition_sound(
 		(int)gtk_drop_down_get_selected( GTK_DROP_DOWN( d->type ) ),
 		(int)gtk_drop_down_get_selected( GTK_DROP_DOWN( d->wave ) ),
@@ -917,19 +970,16 @@ static void _on_audition_clicked( GtkButton*, gpointer user_data )
 		(int)gtk_drop_down_get_selected( GTK_DROP_DOWN( d->ntype ) ),
 		gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->nfreq ) ),
 		gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->noffset ) ),
-		gtk_range_get_value( GTK_RANGE( d->nvol ) ) );
+		gtk_range_get_value( GTK_RANGE( d->nvol ) ),
+		(int)gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->audkey ) ),
+		_SAMPLE_PER_SECOND * dur_sec_pct / 100 );
 }
 
 static void _on_create_clicked( GtkButton*, gpointer user_data )
 {
-	// user_data: struct of dialog widgets
-	struct Dlg {
-		GtkWidget *type, *wave, *volume, *basic_row, *ntype, *nfreq, *noffset, *nvol, *dlgwin;
-	} *d = (Dlg*)user_data;
-
-	int type = (int)gtk_drop_down_get_selected( GTK_DROP_DOWN( d->type ) );
+	SoundDlg* d = (SoundDlg*)user_data;
 	_create_sound(
-		type,
+		(int)gtk_drop_down_get_selected( GTK_DROP_DOWN( d->type ) ),
 		(int)gtk_drop_down_get_selected( GTK_DROP_DOWN( d->wave ) ),
 		(int)gtk_range_get_value( GTK_RANGE( d->volume ) ),
 		(int)gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->basic_row ) ),
@@ -938,20 +988,18 @@ static void _on_create_clicked( GtkButton*, gpointer user_data )
 		gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->noffset ) ),
 		gtk_range_get_value( GTK_RANGE( d->nvol ) ) );
 
-	gtk_window_destroy( GTK_WINDOW( d->dlgwin ) );
+	GtkWidget* win = d->dlgwin;
 	delete d;
+	gtk_window_destroy( GTK_WINDOW( win ) );
 }
 
 static void _sound_dialog()
 {
-	struct Dlg {
-		GtkWidget *type, *wave, *volume, *basic_row, *ntype, *nfreq, *noffset, *nvol, *dlgwin;
-	};
-	Dlg* d = new Dlg{};
+	SoundDlg* d = new SoundDlg{};
 
 	GtkWidget* win = gtk_window_new();
 	gtk_window_set_title( GTK_WINDOW( win ), "create sound" );
-	gtk_window_set_default_size( GTK_WINDOW( win ), 380, 320 );
+	gtk_window_set_default_size( GTK_WINDOW( win ), 400, 480 );
 	d->dlgwin = win;
 
 	GtkWidget* grid = gtk_grid_new();
@@ -1002,6 +1050,24 @@ static void _sound_dialog()
 	gtk_range_set_value( GTK_RANGE( d->nvol ), 0.8 );
 	gtk_widget_set_hexpand( d->nvol, TRUE );
 	gtk_grid_attach( GTK_GRID( grid ), d->nvol, 1, r++, 2, 1 );
+
+	// waveform preview canvas
+	d->wavecanvas = gtk_drawing_area_new();
+	gtk_drawing_area_set_draw_func( GTK_DRAWING_AREA( d->wavecanvas ), _wave_canvas_cb, d, NULL );
+	gtk_widget_set_size_request( d->wavecanvas, -1, 60 );
+	gtk_grid_attach( GTK_GRID( grid ), d->wavecanvas, 0, r++, 2, 1 );
+	g_signal_connect_swapped( d->wave, "notify::selected",
+		G_CALLBACK( +[]( gpointer, gpointer ud ){ gtk_widget_queue_draw( GTK_WIDGET( ud ) ); } ), d->wavecanvas );
+
+	gtk_grid_attach( GTK_GRID( grid ), gtk_label_new( "audition key row:" ), 0, r, 1, 1 );
+	d->audkey = gtk_spin_button_new_with_range( _ROW_MIN, _ROW_MAX, 1 );
+	gtk_spin_button_set_value( GTK_SPIN_BUTTON( d->audkey ), 0x60 );
+	gtk_grid_attach( GTK_GRID( grid ), d->audkey, 1, r++, 1, 1 );
+
+	gtk_grid_attach( GTK_GRID( grid ), gtk_label_new( "audition length (%):" ), 0, r, 1, 1 );
+	d->aurlen = gtk_spin_button_new_with_range( 10, 600, 10 );
+	gtk_spin_button_set_value( GTK_SPIN_BUTTON( d->aurlen ), 100 );
+	gtk_grid_attach( GTK_GRID( grid ), d->aurlen, 1, r++, 1, 1 );
 
 	GtkWidget* btn_aud = gtk_button_new_with_label( "audition" );
 	g_signal_connect( btn_aud, "clicked", G_CALLBACK( _on_audition_clicked ), d );
@@ -1838,6 +1904,7 @@ static bool _init_new_project()
 	v->wave.reso = 10000;
 	v->wave.points = (pxtnPOINT*)malloc( sizeof( pxtnPOINT ) * 32 );
 	_make_wave_points( 0, v->wave.points, &v->wave.num ); // sine
+	_apply_simple_envelope( v );
 
 	// the unit must have a tone-ready woice, or Moo/preview will crash
 	if( g_ed.pxtn->Woice_ReadyTone( w ) != pxtnOK ) return false;
