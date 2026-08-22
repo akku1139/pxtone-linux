@@ -1232,7 +1232,8 @@ static double _repeat_marker_x()
 static double _last_marker_x()
 {
 	int32_t mc = _meas_clock(); if( mc <= 0 ) mc = 1;
-	return ( g_ed.pxtn->master->get_last_meas() + 1 ) * mc * g_ed.px_per_clock - g_ed.h_offset;
+	// playback stops at the START of measure[last_meas] (pxtone semantics)
+	return g_ed.pxtn->master->get_last_meas() * mc * g_ed.px_per_clock - g_ed.h_offset;
 }
 
 static void _set_repeat_at( int32_t clock )
@@ -1252,7 +1253,7 @@ static void _set_repeat_at( int32_t clock )
 static void _set_last_at( int32_t clock )
 {
 	int32_t mc = _meas_clock(); if( mc <= 0 ) mc = 1;
-	int32_t lm = clock / mc - 1; if( lm < 0 ) lm = 0;
+	int32_t lm = clock / mc; if( lm < 0 ) lm = 0;
 	SDL_LockAudio();
 	_push_undo();
 	g_ed.pxtn->master->set_last_meas( lm );
@@ -1338,7 +1339,7 @@ static void _draw_cb( GtkDrawingArea*, cairo_t* cr, int w, int h, gpointer )
 			cairo_set_line_width( cr, 1.0 );
 		};
 		if( rm >= 0 ) handle( rm * meas_clock * g_ed.px_per_clock - g_ed.h_offset, 0.2, 0.9, 0.3 );
-		if( lm >= 0 ) handle( ( lm + 1 ) * meas_clock * g_ed.px_per_clock - g_ed.h_offset, 0.95, 0.25, 0.25 );
+		if( lm >= 0 ) handle( lm * meas_clock * g_ed.px_per_clock - g_ed.h_offset, 0.95, 0.25, 0.25 );
 		cairo_set_line_width( cr, 1.0 );
 
 		static bool hint_shown = false;
