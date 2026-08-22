@@ -150,6 +150,7 @@ static void _on_snap_combo_changed( GtkDropDown* dd, gpointer ); // fwd
 // re-run preparation after song-structure changes so Moo honors the new
 // repeat/last settings; keeps the current playback position.
 
+
 static void _start_play();
 static void _stop_play();
 static void _seek_to( int32_t clock );
@@ -186,6 +187,8 @@ struct SongSnap
 	float   tempo;
 };
 static std::vector<SongSnap> g_undo, g_redo;
+
+static bool g_marker_undo_done = false;
 
 struct ClipNote { int32_t rel_clock; int unit; int32_t key_row; int32_t dur; };
 static std::vector<ClipNote> g_clipboard;
@@ -471,6 +474,7 @@ static void _reprep_keep_pos()
 	double cur_sec = (double)g_ed.played_samples / _SAMPLE_PER_SECOND;
 	double frac = total_sec > 0 ? MIN( MAX( cur_sec / total_sec, 0.0 ), 0.999 ) : 0;
 
+	SDL_LockAudio(); // serialize against the audio callback (Moo reads these)
 	bool was = g_ed.playing;
 	if( was )
 	{
@@ -482,9 +486,13 @@ static void _reprep_keep_pos()
 		{
 			double total_smp = (double)play_meas * m->get_beat_num() * ( 60.0 / g_ed.tempo ) * _SAMPLE_PER_SECOND;
 			g_ed.played_samples = (int64_t)( frac * total_smp );
+			fprintf( stderr, "[reprep] playmeas=%d frac=%.3f total=%.0f\n",
+				play_meas, frac, total_smp );
 		}
 	}
+	SDL_UnlockAudio();
 }
+
 
 static void _start_play()
 {
@@ -1242,7 +1250,7 @@ static void _set_repeat_at( int32_t clock )
 {
 	int32_t mc = _meas_clock(); if( mc <= 0 ) mc = 1;
 	SDL_LockAudio();
-	_push_undo();
+	if( !g_marker_undo_done ){ _push_undo(); g_marker_undo_done = true; }
 	g_ed.pxtn->master->set_repeat_meas( clock / mc );
 	g_ed.tempo = g_ed.pxtn->master->get_beat_tempo();
 	SDL_UnlockAudio();
@@ -1257,7 +1265,7 @@ static void _set_last_at( int32_t clock )
 	int32_t mc = _meas_clock(); if( mc <= 0 ) mc = 1;
 	int32_t lm = clock / mc; if( lm < 0 ) lm = 0;
 	SDL_LockAudio();
-	_push_undo();
+	if( !g_marker_undo_done ){ _push_undo(); g_marker_undo_done = true; }
 	g_ed.pxtn->master->set_last_meas( lm );
 	g_ed.pxtn->master->set_meas_num( lm + 1 );
 	SDL_UnlockAudio();
@@ -1638,9 +1646,9 @@ static void _on_drag_begin( GtkGestureDrag* gesture, double x, double y, gpointe
 	double rx = _repeat_marker_x();
 	double lx = _last_marker_x();
 	if( !alt && fabs( x - rx ) < 6.0 && g_ed.pxtn->master->get_repeat_meas() >= 0 )
-	{ g_ed.mode = DRAG_REPEAT; g_ed.dragging = true; _push_undo(); _set_status( "dragging repeat marker" ); return; }
+	{ g_ed.mode = DRAG_REPEAT; g_ed.dragging = true; g_marker_undo_done = false; _set_status( "dragging repeat marker" ); return; }
 	if( !alt && fabs( x - lx ) < 6.0 && g_ed.pxtn->master->get_last_meas() >= 0 )
-	{ g_ed.mode = DRAG_LAST;   g_ed.dragging = true; _push_undo(); _set_status( "dragging last marker" ); return; }
+	{ g_ed.mode = DRAG_LAST;   g_ed.dragging = true; g_marker_undo_done = false; _set_status( "dragging last marker" ); return; }
 	if( alt )
 	{
 		int32_t sc = _snap_clock( clock );
