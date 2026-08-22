@@ -93,14 +93,11 @@ struct Editor
 	GtkToggleButton* tb_play = nullptr;
 	GtkAdjustment *hadj = NULL, *vadj = NULL;
 
-	// dialog windows (single instance, driven by toggle buttons)
-	GtkWidget* win_sound = NULL;  GtkToggleButton* tb_sound  = NULL;
-	GtkWidget* win_event = NULL;  GtkToggleButton* tb_event  = NULL;
-	GtkWidget* win_song  = NULL;  GtkToggleButton* tb_song   = NULL;
-	GtkWidget* win_rename= NULL;  GtkToggleButton* tb_rename = NULL;
-	GtkWidget* win_units = NULL;  GtkToggleButton* tb_units  = NULL;
+	// right-side panel widgets
+	GtkWidget* notebook    = NULL;
 	GtkWidget* units_list  = NULL;
 	GtkWidget* units_stats = NULL;
+	GtkWidget* rename_entry= NULL;
 	bool file_dlg_busy = false;
 	GtkWidget* unit_combo = NULL;
 	GtkWidget* snap_combo = NULL;
@@ -111,30 +108,28 @@ static Editor g_ed;
 
 static const double PI = 3.141592653589793;
 
-static void _win_destroyed( GtkWidget*, gpointer data )
-{
-	gpointer* arr = (gpointer*)data;
-	*(GtkWidget**)arr[0] = NULL;
-	GtkToggleButton* btn = GTK_TOGGLE_BUTTON( arr[1] );
-	if( gtk_toggle_button_get_active( btn ) ) gtk_toggle_button_set_active( btn, FALSE );
-}
-
-static void _on_toggle_dialog( GtkToggleButton* btn, gpointer data )
-{
-	gpointer* arr = (gpointer*)data;
-	GtkWidget** slot = (GtkWidget**)arr[0];
-	void (*create)() = (void (*)())arr[2];
-	if( gtk_toggle_button_get_active( btn ) ){ if( !*slot ) create(); }
-	else if( *slot ) gtk_window_destroy( GTK_WINDOW( *slot ) );
-}
-
 static void _preview_note( int unit, int row, int32_t clock, int dur_frames = -1 ); // fwd
-
-// ---- dialog window <-> toggle button binding ----------------------------
-
-static void _win_destroyed( GtkWidget*, gpointer );
-static void _on_toggle_dialog( GtkToggleButton*, gpointer );
-static gpointer g_bind_sound[3], g_bind_event[3], g_bind_song[3], g_bind_rename[3], g_bind_units[3];
+static void _on_rename_ok( GtkButton*, gpointer user_data ); // fwd
+static void _activate( GtkApplication* app, gpointer user_data ); // fwd
+static void _draw_cb( GtkDrawingArea*, cairo_t* cr, int w, int h, gpointer );
+static void _on_hscroll( GtkAdjustment* adj, gpointer );
+static void _on_vscroll( GtkAdjustment* adj, gpointer );
+static gboolean _on_scroll( GtkEventControllerScroll*, double dx, double dy, gpointer state );
+static void _on_drag_begin( GtkGestureDrag*, double x, double y, gpointer );
+static void _on_drag_update( GtkGestureDrag* gesture, double, double, gpointer );
+static void _on_drag_end( GtkGestureDrag*, double, double, gpointer );
+static void _on_rdrag_begin( GtkGestureDrag*, double x, double y, gpointer );
+static void _on_rdrag_update( GtkGestureDrag* gesture, double, double, gpointer );
+static gboolean _tick( gpointer );
+static guint g_tick_id = 0;
+static GtkWidget* g_page_children[4] = { NULL, NULL, NULL, NULL };
+static gboolean _on_key( GtkEventControllerKey*, guint keyval, guint, GdkModifierType state, gpointer );
+static GtkWidget* _make_scrolled_page();
+static GtkWidget* _page_child( int i );
+static void _on_window_destroy( GtkWidget*, gpointer );
+static void _build_units_page( GtkWidget* parent ); // fwd
+static void _build_event_page( GtkWidget* parent ); // fwd
+static void _build_song_page( GtkWidget* parent ); // fwd
 
 // ---- undo/redo (project snapshots) --------------------------------------
 
@@ -640,17 +635,11 @@ static void _on_unit_row_selected( GtkListBox*, GtkListBoxRow* row, gpointer )
 	}
 }
 
-static void _units_dialog()
+static void _build_units_page( GtkWidget* parent )
 {
-	GtkWidget* win = gtk_window_new();
-	gtk_window_set_title( GTK_WINDOW( win ), "units" );
-	gtk_window_set_default_size( GTK_WINDOW( win ), 460, 400 );
-	g_ed.win_units = win;
-
 	GtkWidget* vbox = gtk_box_new( GTK_ORIENTATION_VERTICAL, 6 );
 	gtk_widget_set_margin_start ( vbox, 10 ); gtk_widget_set_margin_end  ( vbox, 10 );
 	gtk_widget_set_margin_top   ( vbox, 10 ); gtk_widget_set_margin_bottom( vbox, 10 );
-	gtk_window_set_child( GTK_WINDOW( win ), vbox );
 
 	GtkWidget* sw = gtk_scrolled_window_new();
 	gtk_widget_set_vexpand( sw, TRUE );
@@ -674,8 +663,20 @@ static void _units_dialog()
 	gtk_widget_set_halign( g_ed.units_stats, GTK_ALIGN_END );
 	gtk_box_append( GTK_BOX( vbox ), g_ed.units_stats );
 
+	// rename selected unit
+	GtkWidget* rbox = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 6 );
+	gtk_box_append( GTK_BOX( rbox ), gtk_label_new( "rename:" ) );
+	g_ed.rename_entry = gtk_entry_new();
+	gtk_entry_set_max_length( GTK_ENTRY( g_ed.rename_entry ), pxtnMAX_TUNEUNITNAME );
+	gtk_widget_set_hexpand( g_ed.rename_entry, TRUE );
+	gtk_box_append( GTK_BOX( rbox ), g_ed.rename_entry );
+	GtkWidget* rbtn = gtk_button_new_with_label( "rename" );
+	g_signal_connect( rbtn, "clicked", G_CALLBACK( _on_rename_ok ), g_ed.rename_entry );
+	gtk_box_append( GTK_BOX( rbox ), rbtn );
+	gtk_box_append( GTK_BOX( vbox ), rbox );
+
+	gtk_box_append( GTK_BOX( parent ), vbox );
 	_units_refresh();
-	gtk_window_present( GTK_WINDOW( win ) );
 }
 
 // ---- new tune ------------------------------------------------------------
@@ -1163,21 +1164,110 @@ static void _on_create_clicked( GtkButton*, gpointer user_data )
 	gtk_window_destroy( GTK_WINDOW( win ) );
 }
 
-static void _sound_dialog()
-{
-	SoundDlg* d = new SoundDlg{};
+typedef struct { GtkWidget *tempo,*beat_num,*beat_clock,*meas,*repeat,*last; } SongDlg;
+static SongDlg g_song_dlg;
 
-	GtkWidget* win = gtk_window_new();
-	gtk_window_set_title( GTK_WINDOW( win ), "create sound" );
-	gtk_window_set_default_size( GTK_WINDOW( win ), 400, 480 );
-	d->dlgwin = win;
+static void _apply_song( double tempo, int beat_num, int32_t beat_clock,
+                         int meas_num, int repeat_meas, int last_meas ); // fwd
+
+static void _on_song_apply( GtkButton*, gpointer user_data )
+{
+	SongDlg* d = (SongDlg*)user_data;
+	int rm = (int)gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->repeat ) );
+	int lm = (int)gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->last ) );
+	_apply_song(
+		gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->tempo ) ),
+		(int)gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->beat_num ) ),
+		(int)gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->beat_clock ) ),
+		(int)gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->meas ) ),
+		rm - 1, // -1 = none (spin is 0-based)
+		lm - 1 );
+}
+
+static void _apply_song( double tempo, int beat_num, int32_t beat_clock,
+                         int meas_num, int repeat_meas, int last_meas )
+{
+	if( !g_ed.loaded ) return;
+	if( last_meas < 0 ) last_meas = meas_num - 1; // keep song length consistent (meas is derived from content on load)
+	SDL_LockAudio();
+	_push_undo();
+	g_ed.pxtn->master->Set( beat_num, (float)tempo, beat_clock );
+	g_ed.pxtn->master->set_meas_num   ( meas_num );
+	g_ed.pxtn->master->set_repeat_meas( repeat_meas );
+	g_ed.pxtn->master->set_last_meas  ( last_meas );
+	// song length is derived from the last measure on load; keep in-sync
+	g_ed.pxtn->master->set_meas_num   ( last_meas );
+	SDL_UnlockAudio();
+
+	g_ed.tempo = tempo;
+	_set_status( "song: tempo=%.1f beats=%d clock=%d meas=%d repeat=%d last=%d",
+		tempo, beat_num, beat_clock, meas_num, repeat_meas, last_meas );
+	gtk_widget_queue_draw( g_ed.draw_area );
+}
+
+static void _build_song_page( GtkWidget* parent )
+{
+	SongDlg* d = &g_song_dlg;
 
 	GtkWidget* grid = gtk_grid_new();
 	gtk_grid_set_row_spacing( GTK_GRID( grid ), 6 );
 	gtk_grid_set_column_spacing( GTK_GRID( grid ), 8 );
 	gtk_widget_set_margin_start ( grid, 10 ); gtk_widget_set_margin_end  ( grid, 10 );
 	gtk_widget_set_margin_top   ( grid, 10 ); gtk_widget_set_margin_bottom( grid, 10 );
-	gtk_window_set_child( GTK_WINDOW( win ), grid );
+	int r = 0;
+
+	auto row_label = [&]( const char* txt ){ gtk_grid_attach( GTK_GRID( grid ), gtk_label_new( txt ), 0, r, 1, 1 ); };
+
+	row_label( "tempo" );
+	d->tempo = gtk_spin_button_new_with_range( 30, 300, 0.5 );
+	gtk_spin_button_set_value( GTK_SPIN_BUTTON( d->tempo ), g_ed.pxtn->master->get_beat_tempo() );
+	gtk_grid_attach( GTK_GRID( grid ), d->tempo, 1, r++, 1, 1 );
+
+	row_label( "beats / measure" );
+	d->beat_num = gtk_spin_button_new_with_range( 1, 16, 1 );
+	gtk_spin_button_set_value( GTK_SPIN_BUTTON( d->beat_num ), g_ed.pxtn->master->get_beat_num() );
+	gtk_grid_attach( GTK_GRID( grid ), d->beat_num, 1, r++, 1, 1 );
+
+	row_label( "clock / beat" );
+	d->beat_clock = gtk_spin_button_new_with_range( 96, 1920, 48 );
+	gtk_spin_button_set_value( GTK_SPIN_BUTTON( d->beat_clock ), g_ed.pxtn->master->get_beat_clock() );
+	gtk_grid_attach( GTK_GRID( grid ), d->beat_clock, 1, r++, 1, 1 );
+
+	row_label( "measures" );
+	d->meas = gtk_spin_button_new_with_range( 1, 999, 1 );
+	gtk_spin_button_set_value( GTK_SPIN_BUTTON( d->meas ), g_ed.pxtn->master->get_meas_num() );
+	gtk_grid_attach( GTK_GRID( grid ), d->meas, 1, r++, 1, 1 );
+
+	row_label( "repeat measure (0=none)" );
+	d->repeat = gtk_spin_button_new_with_range( 0, 998, 1 );
+	gtk_spin_button_set_value( GTK_SPIN_BUTTON( d->repeat ), g_ed.pxtn->master->get_repeat_meas() + 1 );
+	gtk_grid_attach( GTK_GRID( grid ), d->repeat, 1, r++, 1, 1 );
+
+	row_label( "last measure (0=none)" );
+	d->last = gtk_spin_button_new_with_range( 0, 999, 1 );
+	gtk_spin_button_set_value( GTK_SPIN_BUTTON( d->last ), g_ed.pxtn->master->get_last_meas() + 1 );
+	gtk_grid_attach( GTK_GRID( grid ), d->last, 1, r++, 1, 1 );
+
+	GtkWidget* btn = gtk_button_new_with_label( "apply" );
+	g_signal_connect( btn, "clicked", G_CALLBACK( _on_song_apply ), d );
+	gtk_grid_attach( GTK_GRID( grid ), btn, 0, r, 2, 1 );
+
+	gtk_widget_set_margin_start ( grid, 10 ); gtk_widget_set_margin_end  ( grid, 10 );
+	gtk_widget_set_margin_top   ( grid, 10 ); gtk_widget_set_margin_bottom( grid, 10 );
+	gtk_box_append( GTK_BOX( parent ), grid );
+}
+
+static void _build_sound_page( GtkWidget* parent )
+{
+	static SoundDlg store; // persists for the lifetime of the window
+	SoundDlg* d = &store;
+	memset( d, 0, sizeof( *d ) );
+
+	GtkWidget* grid = gtk_grid_new();
+	gtk_grid_set_row_spacing( GTK_GRID( grid ), 6 );
+	gtk_grid_set_column_spacing( GTK_GRID( grid ), 8 );
+	gtk_widget_set_margin_start ( grid, 10 ); gtk_widget_set_margin_end  ( grid, 10 );
+	gtk_widget_set_margin_top   ( grid, 10 ); gtk_widget_set_margin_bottom( grid, 10 );
 	int r = 0;
 
 	gtk_grid_attach( GTK_GRID( grid ), gtk_label_new( "type:" ), 0, r, 1, 1 );
@@ -1282,9 +1372,9 @@ static void _sound_dialog()
 	g_signal_connect( btn, "clicked", G_CALLBACK( _on_create_clicked ), d );
 	gtk_grid_attach( GTK_GRID( grid ), btn, 1, r, 2, 1 );
 
-	g_ed.win_sound = win;
-	g_signal_connect( win, "destroy", G_CALLBACK( _win_destroyed ), g_bind_sound );
-	gtk_window_present( GTK_WINDOW( win ) );
+	gtk_widget_set_margin_start ( grid, 10 ); gtk_widget_set_margin_end  ( grid, 10 );
+	gtk_widget_set_margin_top   ( grid, 10 ); gtk_widget_set_margin_bottom( grid, 10 );
+	gtk_box_append( GTK_BOX( parent ), grid );
 }
 
 // ---- event editing (VELOCITY / VOLUME / PAN_VOLUME / PAN_TIME) ----------
@@ -1332,6 +1422,9 @@ static void _set_event( uint8_t kind, int32_t clock, int unit, int32_t value )
 	_set_event_f( kind, clock, unit, (double)value );
 }
 
+typedef struct { GtkWidget *type, *value; } EventDlg;
+static EventDlg g_event_dlg;
+
 static void _on_event_type_changed( GtkDropDown* dd, gpointer user_data )
 {
 	GtkWidget* value = GTK_WIDGET( user_data );
@@ -1346,7 +1439,7 @@ static void _on_event_type_changed( GtkDropDown* dd, gpointer user_data )
 
 static void _on_event_set_clicked( GtkButton*, gpointer user_data )
 {
-	struct D { GtkWidget *type, *value; }* d = (D*)user_data;
+	EventDlg* d = (EventDlg*)user_data;
 	int t = (int)gtk_drop_down_get_selected( GTK_DROP_DOWN( d->type ) );
 	if( t < 0 || t >= _event_kind_num ) return;
 	int unit = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
@@ -1356,22 +1449,15 @@ static void _on_event_set_clicked( GtkButton*, gpointer user_data )
 		gtk_range_get_value( GTK_RANGE( d->value ) ) );
 }
 
-static void _event_dialog()
+static void _build_event_page( GtkWidget* parent )
 {
-	typedef struct { GtkWidget *type, *value, *dlgwin; } D;
-	D* d = new D{};
-
-	GtkWidget* win = gtk_window_new();
-	gtk_window_set_title( GTK_WINDOW( win ), "set event" );
-	gtk_window_set_default_size( GTK_WINDOW( win ), 360, 160 );
-	d->dlgwin = win;
+	EventDlg* d = &g_event_dlg;
 
 	GtkWidget* grid = gtk_grid_new();
 	gtk_grid_set_row_spacing( GTK_GRID( grid ), 6 );
 	gtk_grid_set_column_spacing( GTK_GRID( grid ), 8 );
 	gtk_widget_set_margin_start ( grid, 10 ); gtk_widget_set_margin_end  ( grid, 10 );
 	gtk_widget_set_margin_top   ( grid, 10 ); gtk_widget_set_margin_bottom( grid, 10 );
-	gtk_window_set_child( GTK_WINDOW( win ), grid );
 
 	const char* names[ _event_kind_num + 1 ];
 	for( int i = 0; i < _event_kind_num; i++ ) names[ i ] = _event_kinds[ i ].name;
@@ -1394,14 +1480,13 @@ static void _event_dialog()
 	g_signal_connect( btn, "clicked", G_CALLBACK( _on_event_set_clicked ), d );
 	gtk_grid_attach( GTK_GRID( grid ), btn, 0, 3, 2, 1 );
 
-	g_ed.win_event = win;
-	g_signal_connect( win, "destroy", G_CALLBACK( _win_destroyed ), g_bind_event );
-	gtk_window_present( GTK_WINDOW( win ) );
+	gtk_box_append( GTK_BOX( parent ), grid );
 }
 
-// ---- unit rename ---------------------------------------------------------
+// ---- unit rename (inline in units page) ----------------------------------
 
 static void _refresh_unit_combo(); // fwd
+static void _on_rename_ok( GtkButton*, gpointer user_data );
 
 static void _on_rename_ok( GtkButton*, gpointer user_data )
 {
@@ -1426,132 +1511,219 @@ static void _on_rename_ok( GtkButton*, gpointer user_data )
 	delete d;
 }
 
-static void _rename_dialog()
-{
-	typedef struct { GtkWidget *entry,*dlgwin; } D;
-	D* d = new D{};
-
-	GtkWidget* win = gtk_window_new();
-	gtk_window_set_title( GTK_WINDOW( win ), "rename unit" );
-	gtk_window_set_default_size( GTK_WINDOW( win ), 320, 100 );
-	d->dlgwin = win;
-
-	GtkWidget* box = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 6 );
-	gtk_widget_set_margin_start ( box, 10 ); gtk_widget_set_margin_end( box, 10 );
-	gtk_widget_set_margin_top   ( box, 10 ); gtk_widget_set_margin_bottom( box, 10 );
-	gtk_window_set_child( GTK_WINDOW( win ), box );
-
-	d->entry = gtk_entry_new();
-	gtk_widget_set_hexpand( d->entry, TRUE );
-	gtk_box_append( GTK_BOX( box ), d->entry );
-
-	GtkWidget* btn = gtk_button_new_with_label( "rename" );
-	g_signal_connect( btn, "clicked", G_CALLBACK( _on_rename_ok ), d );
-	gtk_box_append( GTK_BOX( box ), btn );
-
-	g_ed.win_rename = win;
-	g_signal_connect( win, "destroy", G_CALLBACK( _win_destroyed ), g_bind_rename );
-	gtk_window_present( GTK_WINDOW( win ) );
-}
-
 // ---- song settings (tempo / beats / measures / repeat / last) -----------
 
-static void _apply_song( double tempo, int beat_num, int32_t beat_clock,
-                         int meas_num, int repeat_meas, int last_meas )
-{
-	if( !g_ed.loaded ) return;
-	if( last_meas < 0 ) last_meas = meas_num - 1; // keep song length consistent (meas is derived from content on load)
-	SDL_LockAudio();
-	_push_undo();
-	g_ed.pxtn->master->Set( beat_num, (float)tempo, beat_clock );
-	g_ed.pxtn->master->set_meas_num   ( meas_num );
-	g_ed.pxtn->master->set_repeat_meas( repeat_meas );
-	g_ed.pxtn->master->set_last_meas  ( last_meas );
-	// song length is derived from the last measure on load; keep in-sync
-	g_ed.pxtn->master->set_meas_num   ( last_meas );
-	SDL_UnlockAudio();
 
-	g_ed.tempo = tempo;
-	_set_status( "song: tempo=%.1f beats=%d clock=%d meas=%d repeat=%d last=%d",
-		tempo, beat_num, beat_clock, meas_num, repeat_meas, last_meas );
-	gtk_widget_queue_draw( g_ed.draw_area );
+
+static bool _init_new_project()
+{
+	delete g_ed.pxtn;
+	g_ed.pxtn = new pxtnService( _pxtn_r, _pxtn_w, _pxtn_s, _pxtn_p );
+	if( g_ed.pxtn->init() != pxtnOK ) return false;
+	if( !g_ed.pxtn->set_destination_quality( _CHANNEL_NUM, _SAMPLE_PER_SECOND ) ) return false;
+	g_ed.pxtn->master->Set( 4, 120.0f, _BEAT_CLOCK );
+	g_ed.pxtn->master->set_meas_num   ( 8 );
+	g_ed.pxtn->master->set_last_meas  ( 7 );
+	g_ed.pxtn->master->set_repeat_meas( 0 ); // loop the whole (short) song by default
+	g_ed.pxtn->evels->Allocate( 8192 );
+	g_ed.pxtn->Unit_AddNew();
+	int w = g_ed.pxtn->Woice_AddNew();
+	pxtnWoice* wv = g_ed.pxtn->Woice_Get_variable( w );
+	wv->Voice_Allocate( 1 );
+	pxtnVOICEUNIT* v = wv->get_voice_variable( 0 );
+	v->type      = pxtnVOICE_Overtone;   // stock pxTone default tone style
+	v->basic_key = 0x4500;
+	v->volume    = 128;
+	v->voice_flags = PTV_VOICEFLAG_SMOOTH | PTV_VOICEFLAG_WAVELOOP;
+	v->data_flags  = PTV_DATAFLAG_WAVE;
+	v->wave.num    = 8;
+	v->wave.points = (pxtnPOINT*)malloc( sizeof( pxtnPOINT ) * 8 );
+	_make_harmonic_points( 1, v->wave.points, &v->wave.num ); // bright
+	_apply_simple_envelope( v );
+
+	// the unit must have a tone-ready woice, or Moo/preview will crash
+	if( g_ed.pxtn->Woice_ReadyTone( w ) != pxtnOK ) return false;
+	g_ed.pxtn->Unit_Get_variable( 0 )->set_woice( wv );
+	g_ed.pxtn->Unit_Get_variable( 0 )->set_name_buf( "unit 0", 6 );
+
+	// allow Play without loading a file first
+	g_ed.pxtn->tones_ready();
+	g_ed.pxtn->moo_set_valid_data( true );
+
+	// reset editor state
+	g_undo.clear(); g_redo.clear(); g_clipboard.clear();
+	g_ed.has_sel = false; g_ed.dragging = false; g_ed.mode = DRAG_NONE;
+	g_ed.unit_num = 1; g_ed.tempo = 120.0;
+	g_ed.loaded = true; // the fresh project is playable
+	g_ed.path.clear();
+	g_ed.h_offset = 0; g_ed.v_offset = 0;
+	return true;
 }
 
-static void _on_song_apply( GtkButton*, gpointer user_data )
+static bool _load_tune()
 {
-	struct D { GtkWidget *tempo,*beat_num,*beat_clock,*meas,*repeat,*last,*dlgwin; }* d = (D*)user_data;
-	int rm = (int)gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->repeat ) );
-	int lm = (int)gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->last ) );
-	_apply_song(
-		gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->tempo ) ),
-		(int)gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->beat_num ) ),
-		(int)gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->beat_clock ) ),
-		(int)gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->meas ) ),
-		rm - 1, // -1 = none (spin is 0-based)
-		lm - 1 );
-	gtk_window_destroy( GTK_WINDOW( d->dlgwin ) );
-	delete d;
+	bool need_new = g_ed.path.empty();
+
+	if( !need_new )
+	{
+		pxtnService* pxtn = new pxtnService( _pxtn_r, _pxtn_w, _pxtn_s, _pxtn_p );
+		g_ed.pxtn = pxtn;
+
+		pxtnERR err = pxtn->init();
+		if( err == pxtnOK ) err = pxtn->set_destination_quality( _CHANNEL_NUM, _SAMPLE_PER_SECOND ) ? pxtnOK : pxtnERR_INIT;
+
+		FILE* fp = NULL;
+		if( err == pxtnOK && !( fp = fopen( g_ed.path.c_str(), "rb" ) ) )
+			{ err = pxtnERR_desc_r; }
+		if( err == pxtnOK ){ err = pxtn->read( fp ); fclose( fp ); }
+		if( err == pxtnOK && ( err = pxtn->tones_ready() ) != pxtnOK ){}
+
+		if( err != pxtnOK )
+		{
+			// missing / broken file: fall back to a fresh project
+			char msg[ 512 ];
+			snprintf( msg, sizeof( msg ), "cannot load '%s' (%s) - creating new tune",
+				g_ed.path.c_str(), pxtnError_get_string( err ) );
+			_set_status( "%s", msg );
+		}
+		else
+		{
+			_ensure_evels_capacity();
+			g_ed.unit_num = pxtn->Unit_Num();
+			g_ed.tempo    = pxtn->master->get_beat_tempo();
+			if( g_ed.tempo <= 0 ) g_ed.tempo = EVENTDEFAULT_BEATTEMPO;
+			g_ed.loaded = true;
+			return true;
+		}
+	}
+
+	if( !_init_new_project() ){ g_ed.err = "failed to create new project"; return false; }
+	return true;
 }
 
-static void _song_dialog()
+static void _activate( GtkApplication* app, gpointer )
 {
-	typedef struct { GtkWidget *tempo,*beat_num,*beat_clock,*meas,*repeat,*last,*dlgwin; } D;
-	D* d = new D{};
+	g_ed.window = gtk_application_window_new( app );
+	gtk_window_set_title( GTK_WINDOW( g_ed.window ), "pxtone-editor" );
+	gtk_window_set_default_size( GTK_WINDOW( g_ed.window ), 1280, 760 );
 
-	pxtnMaster* m = g_ed.pxtn->master;
+	GtkWidget* root = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 0 );
+	gtk_window_set_child( GTK_WINDOW( g_ed.window ), root );
 
-	GtkWidget* win = gtk_window_new();
-	gtk_window_set_title( GTK_WINDOW( win ), "song settings" );
-	gtk_window_set_default_size( GTK_WINDOW( win ), 340, 300 );
-	d->dlgwin = win;
+	GtkWidget* vbox = gtk_box_new( GTK_ORIENTATION_VERTICAL, 0 );
+	gtk_widget_set_hexpand( vbox, TRUE );
+	gtk_box_append( GTK_BOX( root ), vbox );
 
-	GtkWidget* grid = gtk_grid_new();
-	gtk_grid_set_row_spacing( GTK_GRID( grid ), 6 );
-	gtk_grid_set_column_spacing( GTK_GRID( grid ), 8 );
-	gtk_widget_set_margin_start ( grid, 10 ); gtk_widget_set_margin_end  ( grid, 10 );
-	gtk_widget_set_margin_top   ( grid, 10 ); gtk_widget_set_margin_bottom( grid, 10 );
-	gtk_window_set_child( GTK_WINDOW( win ), grid );
-	int r = 0;
+	// header controls (horizontally scrollable when the window is narrow)
+	GtkWidget* header = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 6 );
+	gtk_widget_set_margin_start ( header, 8 );
+	gtk_widget_set_margin_end   ( header, 8 );
+	gtk_widget_set_margin_top   ( header, 6 );
+	gtk_widget_set_margin_bottom( header, 6 );
+	GtkWidget* header_sw = gtk_scrolled_window_new();
+	gtk_scrolled_window_set_policy( GTK_SCROLLED_WINDOW( header_sw ),
+		GtkPolicyType::GTK_POLICY_AUTOMATIC, GtkPolicyType::GTK_POLICY_NEVER );
+	gtk_scrolled_window_set_child( GTK_SCROLLED_WINDOW( header_sw ), header );
+	gtk_box_append( GTK_BOX( vbox ), header_sw );
 
-	auto row_label = [&]( const char* txt ){ gtk_grid_attach( GTK_GRID( grid ), gtk_label_new( txt ), 0, r, 1, 1 ); };
+	gtk_box_append( GTK_BOX( header ), gtk_label_new( "unit:" ) );
+	GtkStringList* unit_list = gtk_string_list_new( NULL );
+	for( int i = 0; i < g_ed.unit_num; i++ )
+	{
+		int32_t size = 0;
+		const char* name = g_ed.pxtn->Unit_Get( i )->get_name_buf( &size );
+		gtk_string_list_append( unit_list, name && name[0] ? name : "(no name)" );
+	}
+	g_ed.unit_combo = gtk_drop_down_new( G_LIST_MODEL( unit_list ), NULL );
+	gtk_box_append( GTK_BOX( header ), g_ed.unit_combo );
 
-	row_label( "tempo" );
-	d->tempo = gtk_spin_button_new_with_range( 30, 300, 0.5 );
-	gtk_spin_button_set_value( GTK_SPIN_BUTTON( d->tempo ), m->get_beat_tempo() );
-	gtk_grid_attach( GTK_GRID( grid ), d->tempo, 1, r++, 1, 1 );
+	GtkWidget* btn_new   = gtk_button_new_with_label( "new" );
+	GtkWidget* btn_open  = gtk_button_new_with_label( "open..." );
+	GtkWidget* btn_saveas= gtk_button_new_with_label( "save as..." );
+	GtkWidget* btn_undo  = gtk_button_new_with_label( "undo" );
+	GtkWidget* btn_redo  = gtk_button_new_with_label( "redo" );
+	GtkWidget* btn_play  = gtk_toggle_button_new_with_label( "\xe2\x96\xb6 play" );
 
-	row_label( "beats / measure" );
-	d->beat_num = gtk_spin_button_new_with_range( 1, 16, 1 );
-	gtk_spin_button_set_value( GTK_SPIN_BUTTON( d->beat_num ), m->get_beat_num() );
-	gtk_grid_attach( GTK_GRID( grid ), d->beat_num, 1, r++, 1, 1 );
+	g_signal_connect_swapped( btn_new,   "clicked", G_CALLBACK( +[]( gpointer ){ _new_tune(); } ), NULL );
+	g_signal_connect_swapped( btn_open,  "clicked", G_CALLBACK( +[]( gpointer ){ _open_dialog(); } ), NULL );
+	g_signal_connect_swapped( btn_saveas,"clicked", G_CALLBACK( +[]( gpointer ){ _save_as_dialog(); } ), NULL );
+	g_signal_connect_swapped( btn_undo,  "clicked", G_CALLBACK( +[]( gpointer ){ _undo(); } ), NULL );
+	g_signal_connect_swapped( btn_redo,  "clicked", G_CALLBACK( +[]( gpointer ){ _redo(); } ), NULL );
+	for( GtkWidget* b : { btn_new, btn_open, btn_saveas, btn_undo, btn_redo } )
+		gtk_box_append( GTK_BOX( header ), b );
 
-	row_label( "clock / beat" );
-	d->beat_clock = gtk_spin_button_new_with_range( 96, 1920, 48 );
-	gtk_spin_button_set_value( GTK_SPIN_BUTTON( d->beat_clock ), m->get_beat_clock() );
-	gtk_grid_attach( GTK_GRID( grid ), d->beat_clock, 1, r++, 1, 1 );
+	// combined play/stop toggle
+	g_ed.tb_play = GTK_TOGGLE_BUTTON( btn_play );
+	gtk_box_append( GTK_BOX( header ), btn_play );
+	g_signal_connect( btn_play, "toggled", G_CALLBACK( +[]( GtkToggleButton* b, gpointer ){
+		bool active = gtk_toggle_button_get_active( b );
+		if( active && !g_ed.playing ) _start_play();
+		else if( !active && g_ed.playing ) _stop_play();
+	} ), NULL );
 
-	row_label( "measures" );
-	d->meas = gtk_spin_button_new_with_range( 1, 999, 1 );
-	gtk_spin_button_set_value( GTK_SPIN_BUTTON( d->meas ), m->get_meas_num() );
-	gtk_grid_attach( GTK_GRID( grid ), d->meas, 1, r++, 1, 1 );
+	// drawing area
+	g_ed.draw_area = gtk_drawing_area_new();
+	gtk_drawing_area_set_draw_func( GTK_DRAWING_AREA( g_ed.draw_area ), _draw_cb, NULL, NULL );
 
-	row_label( "repeat measure (0=none)" );
-	d->repeat = gtk_spin_button_new_with_range( 0, 998, 1 );
-	gtk_spin_button_set_value( GTK_SPIN_BUTTON( d->repeat ), m->get_repeat_meas() + 1 );
-	gtk_grid_attach( GTK_GRID( grid ), d->repeat, 1, r++, 1, 1 );
+	// scrollbars
+	g_ed.hadj = GTK_ADJUSTMENT( gtk_adjustment_new( 0, 0, 100000, 40, 200, 200 ) );
+	g_ed.vadj = GTK_ADJUSTMENT( gtk_adjustment_new( 0, 0, 1600, 40, 200, 200 ) );
+	g_signal_connect( g_ed.hadj, "value-changed", G_CALLBACK( _on_hscroll ), NULL );
+	g_signal_connect( g_ed.vadj, "value-changed", G_CALLBACK( _on_vscroll ), NULL );
 
-	row_label( "last measure (0=none)" );
-	d->last = gtk_spin_button_new_with_range( 0, 999, 1 );
-	gtk_spin_button_set_value( GTK_SPIN_BUTTON( d->last ), m->get_last_meas() + 1 );
-	gtk_grid_attach( GTK_GRID( grid ), d->last, 1, r++, 1, 1 );
+	GtkWidget* center = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 0 );
+	gtk_widget_set_hexpand( g_ed.draw_area, TRUE );
+	gtk_widget_set_vexpand( g_ed.draw_area, TRUE );
+	gtk_box_append( GTK_BOX( center ), g_ed.draw_area );
+	gtk_box_append( GTK_BOX( center ), gtk_scrollbar_new( GTK_ORIENTATION_VERTICAL, g_ed.vadj ) );
+	gtk_widget_set_vexpand( center, TRUE );
+	gtk_box_append( GTK_BOX( vbox ), center );
+	gtk_box_append( GTK_BOX( vbox ), gtk_scrollbar_new( GTK_ORIENTATION_HORIZONTAL, g_ed.hadj ) );
 
-	GtkWidget* btn = gtk_button_new_with_label( "apply" );
-	g_signal_connect( btn, "clicked", G_CALLBACK( _on_song_apply ), d );
-	gtk_grid_attach( GTK_GRID( grid ), btn, 0, r, 2, 1 );
+	// input controllers
+	GtkGesture* rdrag = gtk_gesture_drag_new();
+	gtk_gesture_single_set_button( GTK_GESTURE_SINGLE( rdrag ), GDK_BUTTON_SECONDARY );
+	g_signal_connect( rdrag, "drag-begin",  G_CALLBACK( _on_rdrag_begin ),  NULL );
+	g_signal_connect( rdrag, "drag-update", G_CALLBACK( _on_rdrag_update ), NULL );
+	gtk_widget_add_controller( g_ed.draw_area, GTK_EVENT_CONTROLLER( rdrag ) );
 
-	g_ed.win_song = win;
-	g_signal_connect( win, "destroy", G_CALLBACK( _win_destroyed ), g_bind_song );
-	gtk_window_present( GTK_WINDOW( win ) );
+	GtkGesture* drag = gtk_gesture_drag_new();
+	gtk_gesture_single_set_button( GTK_GESTURE_SINGLE( drag ), GDK_BUTTON_PRIMARY );
+	g_signal_connect( drag, "drag-begin",  G_CALLBACK( _on_drag_begin ),  NULL );
+	g_signal_connect( drag, "drag-update", G_CALLBACK( _on_drag_update ), NULL );
+	g_signal_connect( drag, "drag-end",    G_CALLBACK( _on_drag_end ),    NULL );
+	gtk_widget_add_controller( g_ed.draw_area, GTK_EVENT_CONTROLLER( drag ) );
+
+	GtkEventController* scroll = gtk_event_controller_scroll_new(
+		(GtkEventControllerScrollFlags)( GTK_EVENT_CONTROLLER_SCROLL_BOTH_AXES | GTK_EVENT_CONTROLLER_SCROLL_DISCRETE ) );
+	g_signal_connect( scroll, "scroll", G_CALLBACK( +[]( GtkEventControllerScroll* c, double dx, double dy, gpointer ) -> gboolean
+	{
+		GdkModifierType mod = gtk_event_controller_get_current_event_state( GTK_EVENT_CONTROLLER( c ) );
+		return _on_scroll( c, dx, dy, (gpointer)(uintptr_t)mod );
+	} ), NULL );
+	gtk_widget_add_controller( g_ed.draw_area, scroll );
+
+	GtkEventController* key = gtk_event_controller_key_new();
+	g_signal_connect( key, "key-pressed", G_CALLBACK( _on_key ), NULL );
+	gtk_widget_add_controller( g_ed.window, key );
+
+	// right-side panel notebook
+	g_ed.notebook = gtk_notebook_new();
+	gtk_widget_set_size_request( g_ed.notebook, 330, -1 );
+	const char* names[] = { "sound", "units", "event", "song" };
+	for( int i = 0; i < 4; i++ )
+		gtk_notebook_append_page( GTK_NOTEBOOK( g_ed.notebook ),
+			_make_scrolled_page(), gtk_label_new( names[ i ] ) );
+	_build_sound_page( _page_child( 0 ) );
+	_build_units_page( _page_child( 1 ) );
+	_build_event_page( _page_child( 2 ) );
+	_build_song_page ( _page_child( 3 ) );
+	gtk_box_append( GTK_BOX( root ), g_ed.notebook );
+
+	g_tick_id = g_timeout_add( 33, _tick, NULL );
+	g_signal_connect( g_ed.window, "destroy", G_CALLBACK( _on_window_destroy ), NULL );
+
+	gtk_window_present( GTK_WINDOW( g_ed.window ) );
 }
 
 // ---- drawing ------------------------------------------------------------
@@ -1886,7 +2058,6 @@ static void _on_vscroll( GtkAdjustment* adj, gpointer )
 	gtk_widget_queue_draw( g_ed.draw_area );
 }
 
-static guint g_tick_id = 0;
 
 static void _on_window_destroy( GtkWidget*, gpointer )
 {
@@ -1922,239 +2093,22 @@ static void _on_snap_changed( GtkDropDown*, GParamSpec*, gpointer )
 
 // ---- app ----------------------------------------------------------------
 
-static void _activate( GtkApplication* app, gpointer )
-{
-	g_ed.window = gtk_application_window_new( app );
-	gtk_window_set_title( GTK_WINDOW( g_ed.window ), "pxtone-editor" );
-	gtk_window_set_default_size( GTK_WINDOW( g_ed.window ), 1100, 700 );
 
+static GtkWidget* _make_scrolled_page()
+{
+	GtkWidget* sw = gtk_scrolled_window_new();
+	gtk_scrolled_window_set_policy( GTK_SCROLLED_WINDOW( sw ),
+		GtkPolicyType::GTK_POLICY_NEVER, GtkPolicyType::GTK_POLICY_AUTOMATIC );
 	GtkWidget* vbox = gtk_box_new( GTK_ORIENTATION_VERTICAL, 0 );
-	gtk_window_set_child( GTK_WINDOW( g_ed.window ), vbox );
-
-	// header controls (horizontally scrollable when the window is narrow)
-	GtkWidget* hbox = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 6 );
-	gtk_widget_set_margin_start ( hbox, 8 );
-	gtk_widget_set_margin_end   ( hbox, 8 );
-	gtk_widget_set_margin_top   ( hbox, 6 );
-	gtk_widget_set_margin_bottom( hbox, 6 );
-	GtkWidget* header_sw = gtk_scrolled_window_new();
-	gtk_scrolled_window_set_policy( GTK_SCROLLED_WINDOW( header_sw ),
-		GtkPolicyType::GTK_POLICY_AUTOMATIC, GtkPolicyType::GTK_POLICY_NEVER );
-	gtk_scrolled_window_set_child( GTK_SCROLLED_WINDOW( header_sw ), hbox );
-	gtk_box_append( GTK_BOX( vbox ), header_sw );
-
-	gtk_box_append( GTK_BOX( hbox ), gtk_label_new( "unit:" ) );
-	GtkStringList* unit_list = gtk_string_list_new( NULL );
-	for( int i = 0; i < g_ed.unit_num; i++ )
-	{
-		int32_t size = 0;
-		const char* name = g_ed.pxtn->Unit_Get( i )->get_name_buf( &size );
-		gtk_string_list_append( unit_list, name && name[0] ? name : "(no name)" );
-	}
-	g_ed.unit_combo = gtk_drop_down_new( G_LIST_MODEL( unit_list ), NULL );
-	gtk_box_append( GTK_BOX( hbox ), g_ed.unit_combo );
-
-	GtkWidget* btn_units = gtk_toggle_button_new_with_label( "units..." );
-	GtkWidget* btn_sound = gtk_toggle_button_new_with_label( "sound..." );
-	GtkWidget* btn_event = gtk_toggle_button_new_with_label( "event..." );
-	GtkWidget* btn_song  = gtk_toggle_button_new_with_label( "song..." );
-	GtkWidget* btn_new   = gtk_button_new_with_label( "new" );
-	GtkWidget* btn_open  = gtk_button_new_with_label( "open..." );
-	GtkWidget* btn_saveas= gtk_button_new_with_label( "save as..." );
-	GtkWidget* btn_undo  = gtk_button_new_with_label( "undo" );
-	GtkWidget* btn_redo  = gtk_button_new_with_label( "redo" );
-	GtkWidget* btn_play  = gtk_toggle_button_new_with_label( "▶ play" );
-	GtkToggleButton* tb_stop = nullptr; (void)tb_stop;
-	// dialog toggles: one window per button, closed by pressing again
-	g_ed.tb_sound  = GTK_TOGGLE_BUTTON( btn_sound );
-	g_ed.tb_event  = GTK_TOGGLE_BUTTON( btn_event );
-	g_ed.tb_units  = GTK_TOGGLE_BUTTON( btn_units );
-	g_ed.tb_song   = GTK_TOGGLE_BUTTON( btn_song );
-	g_bind_sound [0] = &g_ed.win_sound;  g_bind_sound [1] = btn_sound; g_bind_sound [2] = (gpointer)_sound_dialog;
-	g_bind_event [0] = &g_ed.win_event;  g_bind_event [1] = btn_event; g_bind_event [2] = (gpointer)_event_dialog;
-	g_bind_units [0] = &g_ed.win_units;  g_bind_units [1] = btn_units; g_bind_units [2] = (gpointer)_units_dialog;
-	g_bind_song  [0] = &g_ed.win_song;   g_bind_song  [1] = btn_song;  g_bind_song  [2] = (gpointer)_song_dialog;
-	g_signal_connect( btn_sound, "toggled", G_CALLBACK( _on_toggle_dialog ), g_bind_sound );
-	g_signal_connect( btn_event, "toggled", G_CALLBACK( _on_toggle_dialog ), g_bind_event );
-	g_signal_connect( btn_units, "toggled", G_CALLBACK( _on_toggle_dialog ), g_bind_units );
-	g_signal_connect( btn_song,  "toggled", G_CALLBACK( _on_toggle_dialog ), g_bind_song );
-
-	// combined play/stop toggle
-	g_signal_connect( btn_play, "toggled", G_CALLBACK( +[]( GtkToggleButton* b, gpointer ){
-		fprintf( stderr, "[play-btn] toggled active=%d playing=%d\n",
-			gtk_toggle_button_get_active( b ) ? 1 : 0, g_ed.playing ? 1 : 0 );
-		bool active = gtk_toggle_button_get_active( b );
-		if( active && !g_ed.playing ) _start_play();
-		else if( !active && g_ed.playing ) _stop_play();
-	} ), NULL );
-	g_signal_connect_swapped( btn_new,   "clicked", G_CALLBACK( +[]( gpointer ){ _new_tune(); } ), NULL );
-	g_signal_connect_swapped( btn_open,  "clicked", G_CALLBACK( +[]( gpointer ){ _open_dialog(); } ), NULL );
-	g_signal_connect_swapped( btn_saveas,"clicked", G_CALLBACK( +[]( gpointer ){ _save_as_dialog(); } ), NULL );
-	g_signal_connect_swapped( btn_undo,  "clicked", G_CALLBACK( +[]( gpointer ){ _undo(); } ), NULL );
-	g_signal_connect_swapped( btn_redo,  "clicked", G_CALLBACK( +[]( gpointer ){ _redo(); } ), NULL );
-	gtk_box_append( GTK_BOX( hbox ), btn_sound );
-	gtk_box_append( GTK_BOX( hbox ), btn_song );
-	gtk_box_append( GTK_BOX( hbox ), btn_event );
-	gtk_box_append( GTK_BOX( hbox ), btn_units );
-	gtk_box_append( GTK_BOX( hbox ), btn_play );
-	gtk_box_append( GTK_BOX( hbox ), btn_new );
-	gtk_box_append( GTK_BOX( hbox ), btn_open );
-	gtk_box_append( GTK_BOX( hbox ), btn_saveas );
-	gtk_box_append( GTK_BOX( hbox ), btn_undo );
-	gtk_box_append( GTK_BOX( hbox ), btn_redo );
-
-	gtk_box_append( GTK_BOX( hbox ), gtk_label_new( "snap:" ) );
-	g_ed.snap_combo = gtk_drop_down_new_from_strings( (const char*[]){ "1/4", "1/8", "1/16", "1/32", NULL } );
-	gtk_drop_down_set_selected( GTK_DROP_DOWN( g_ed.snap_combo ), 1 );
-	g_signal_connect( g_ed.snap_combo, "notify::selected", G_CALLBACK( _on_snap_changed ), NULL );
-	gtk_box_append( GTK_BOX( hbox ), g_ed.snap_combo );
-
-	g_ed.status = gtk_label_new( g_ed.loaded ? "ready" : g_ed.err.c_str() );
-	gtk_widget_set_hexpand( g_ed.status, TRUE );
-	gtk_widget_set_halign( g_ed.status, GTK_ALIGN_END );
-	gtk_box_append( GTK_BOX( hbox ), g_ed.status );
-
-	// drawing area
-	g_ed.draw_area = gtk_drawing_area_new();
-	gtk_drawing_area_set_draw_func( GTK_DRAWING_AREA( g_ed.draw_area ), _draw_cb, NULL, NULL );
-	gtk_widget_set_vexpand( g_ed.draw_area, TRUE );
-
-	// scrollbars (kept in sync with h_offset / v_offset)
-	g_ed.hadj = GTK_ADJUSTMENT( gtk_adjustment_new( 0, 0, 100000, 40, 200, 200 ) );
-	g_ed.vadj = GTK_ADJUSTMENT( gtk_adjustment_new( 0, 0, 1600, 40, 200, 200 ) );
-	g_signal_connect( g_ed.hadj, "value-changed", G_CALLBACK( _on_hscroll ), NULL );
-	g_signal_connect( g_ed.vadj, "value-changed", G_CALLBACK( _on_vscroll ), NULL );
-
-	GtkWidget* center = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 0 );
-	gtk_widget_set_hexpand( g_ed.draw_area, TRUE ); // must expand or its width collapses to 0
-	gtk_box_append( GTK_BOX( center ), g_ed.draw_area );
-	gtk_box_append( GTK_BOX( center ), gtk_scrollbar_new( GTK_ORIENTATION_VERTICAL, g_ed.vadj ) );
-	gtk_widget_set_vexpand( center, TRUE );
-	gtk_box_append( GTK_BOX( vbox ), center );
-	gtk_box_append( GTK_BOX( vbox ), gtk_scrollbar_new( GTK_ORIENTATION_HORIZONTAL, g_ed.hadj ) );
-
-	// right-click drag: delete notes under the cursor (continuously)
-	GtkGesture* rdrag = gtk_gesture_drag_new();
-	gtk_gesture_single_set_button( GTK_GESTURE_SINGLE( rdrag ), GDK_BUTTON_SECONDARY );
-	g_signal_connect( rdrag, "drag-begin",  G_CALLBACK( _on_rdrag_begin ),  NULL );
-	g_signal_connect( rdrag, "drag-update", G_CALLBACK( _on_rdrag_update ), NULL );
-	gtk_widget_add_controller( g_ed.draw_area, GTK_EVENT_CONTROLLER( rdrag ) );
-
-	// left-click drag: create / resize notes (updates while button held)
-	GtkGesture* drag = gtk_gesture_drag_new();
-	gtk_gesture_single_set_button( GTK_GESTURE_SINGLE( drag ), GDK_BUTTON_PRIMARY );
-	g_signal_connect( drag, "drag-begin",  G_CALLBACK( _on_drag_begin ),  NULL );
-	g_signal_connect( drag, "drag-update", G_CALLBACK( _on_drag_update ), NULL );
-	g_signal_connect( drag, "drag-end",    G_CALLBACK( _on_drag_end ),    NULL );
-	gtk_widget_add_controller( g_ed.draw_area, GTK_EVENT_CONTROLLER( drag ) );
-
-	GtkEventController* scroll = gtk_event_controller_scroll_new(
-		(GtkEventControllerScrollFlags)( GTK_EVENT_CONTROLLER_SCROLL_BOTH_AXES | GTK_EVENT_CONTROLLER_SCROLL_DISCRETE ) );
-	g_signal_connect( scroll, "scroll", G_CALLBACK( +[]( GtkEventControllerScroll* c, double dx, double dy, gpointer ) -> gboolean
-	{
-		GdkModifierType mod = gtk_event_controller_get_current_event_state( GTK_EVENT_CONTROLLER( c ) );
-		return _on_scroll( c, dx, dy, (gpointer)(uintptr_t)mod );
-	} ), NULL );
-	gtk_widget_add_controller( g_ed.draw_area, scroll );
-
-	GtkEventController* key = gtk_event_controller_key_new();
-	g_signal_connect( key, "key-pressed", G_CALLBACK( _on_key ), NULL );
-	gtk_widget_add_controller( g_ed.window, key );
-
-	g_tick_id = g_timeout_add( 33, _tick, NULL );
-	g_signal_connect( g_ed.window, "destroy", G_CALLBACK( _on_window_destroy ), NULL );
-
-	gtk_window_present( GTK_WINDOW( g_ed.window ) );
+	gtk_scrolled_window_set_child( GTK_SCROLLED_WINDOW( sw ), vbox );
+	for( int i = 0; i < 4; i++ )
+		if( !g_page_children[ i ] ){ g_page_children[ i ] = vbox; break; }
+	return vbox;
 }
 
-// ---- load ---------------------------------------------------------------
+static GtkWidget* _page_child( int i ){ return g_page_children[ i ]; }
 
-// Build a fresh default project in memory (no widgets touched).
-static bool _init_new_project()
-{
-	delete g_ed.pxtn;
-	g_ed.pxtn = new pxtnService( _pxtn_r, _pxtn_w, _pxtn_s, _pxtn_p );
-	if( g_ed.pxtn->init() != pxtnOK ) return false;
-	if( !g_ed.pxtn->set_destination_quality( _CHANNEL_NUM, _SAMPLE_PER_SECOND ) ) return false;
-	g_ed.pxtn->master->Set( 4, 120.0f, _BEAT_CLOCK );
-	g_ed.pxtn->master->set_meas_num   ( 8 );
-	g_ed.pxtn->master->set_last_meas  ( 7 );
-	g_ed.pxtn->master->set_repeat_meas( 0 ); // loop the whole (short) song by default
-	g_ed.pxtn->evels->Allocate( 8192 );
-	g_ed.pxtn->Unit_AddNew();
-	int w = g_ed.pxtn->Woice_AddNew();
-	pxtnWoice* wv = g_ed.pxtn->Woice_Get_variable( w );
-	wv->Voice_Allocate( 1 );
-	pxtnVOICEUNIT* v = wv->get_voice_variable( 0 );
-	v->type      = pxtnVOICE_Overtone;   // stock pxTone default tone style
-	v->basic_key = 0x4500;
-	v->volume    = 128;
-	v->voice_flags = PTV_VOICEFLAG_SMOOTH | PTV_VOICEFLAG_WAVELOOP;
-	v->data_flags  = PTV_DATAFLAG_WAVE;
-	v->wave.num    = 8;
-	v->wave.points = (pxtnPOINT*)malloc( sizeof( pxtnPOINT ) * 8 );
-	_make_harmonic_points( 1, v->wave.points, &v->wave.num ); // bright
-	_apply_simple_envelope( v );
 
-	// the unit must have a tone-ready woice, or Moo/preview will crash
-	if( g_ed.pxtn->Woice_ReadyTone( w ) != pxtnOK ) return false;
-	g_ed.pxtn->Unit_Get_variable( 0 )->set_woice( wv );
-	g_ed.pxtn->Unit_Get_variable( 0 )->set_name_buf( "unit 0", 6 );
-
-	// allow Play without loading a file first
-	g_ed.pxtn->tones_ready();
-	g_ed.pxtn->moo_set_valid_data( true );
-
-	// reset editor state
-	g_undo.clear(); g_redo.clear(); g_clipboard.clear();
-	g_ed.has_sel = false; g_ed.dragging = false; g_ed.mode = DRAG_NONE;
-	g_ed.unit_num = 1; g_ed.tempo = 120.0;
-	g_ed.loaded = true; // the fresh project is playable
-	g_ed.path.clear();
-	g_ed.h_offset = 0; g_ed.v_offset = 0;
-	return true;
-}
-
-static bool _load_tune()
-{
-	bool need_new = g_ed.path.empty();
-
-	if( !need_new )
-	{
-		pxtnService* pxtn = new pxtnService( _pxtn_r, _pxtn_w, _pxtn_s, _pxtn_p );
-		g_ed.pxtn = pxtn;
-
-		pxtnERR err = pxtn->init();
-		if( err == pxtnOK ) err = pxtn->set_destination_quality( _CHANNEL_NUM, _SAMPLE_PER_SECOND ) ? pxtnOK : pxtnERR_INIT;
-
-		FILE* fp = NULL;
-		if( err == pxtnOK && !( fp = fopen( g_ed.path.c_str(), "rb" ) ) )
-			{ err = pxtnERR_desc_r; }
-		if( err == pxtnOK ){ err = pxtn->read( fp ); fclose( fp ); }
-		if( err == pxtnOK && ( err = pxtn->tones_ready() ) != pxtnOK ){}
-
-		if( err != pxtnOK )
-		{
-			// missing / broken file: fall back to a fresh project
-			char msg[ 512 ];
-			snprintf( msg, sizeof( msg ), "cannot load '%s' (%s) - creating new tune",
-				g_ed.path.c_str(), pxtnError_get_string( err ) );
-			_set_status( "%s", msg );
-		}
-		else
-		{
-			_ensure_evels_capacity();
-			g_ed.unit_num = pxtn->Unit_Num();
-			g_ed.tempo    = pxtn->master->get_beat_tempo();
-			if( g_ed.tempo <= 0 ) g_ed.tempo = EVENTDEFAULT_BEATTEMPO;
-			g_ed.loaded = true;
-			return true;
-		}
-	}
-
-	if( !_init_new_project() ){ g_ed.err = "failed to create new project"; return false; }
-	return true;
-}
 
 int main( int argc, char** argv )
 {
