@@ -2427,6 +2427,10 @@ int main( int argc, char** argv )
 	SDL_PauseAudio( 0 );
 	g_ed.pv_buf.assign( _SAMPLE_PER_SECOND * _CHANNEL_NUM, 0 );
 
+	// The Vulkan GSK renderer can leave stale frames on some drivers
+	// (vkAcquireNextImageKHR SUBOPTIMAL spam). Cairo is reliable.
+	g_setenv( "GSK_RENDERER", "cairo", TRUE );
+
 	g_app = gtk_application_new( "com.github.pxtone.editor", G_APPLICATION_NON_UNIQUE );
 	g_signal_connect( g_app, "activate", G_CALLBACK( _activate ), NULL );
 	int ret = g_application_run( G_APPLICATION( g_app ), 0, NULL );
