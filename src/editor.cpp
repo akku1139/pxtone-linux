@@ -327,7 +327,7 @@ static void _sdl_audio_callback( void*, Uint8* stream, int len )
 
 static void _start_play()
 {
-	if( !g_ed.loaded || g_ed.playing ) return;
+	if( !g_ed.loaded || g_ed.playing ){ fprintf( stderr, "[play] skipped (loaded=%d playing=%d)\n", g_ed.loaded?1:0, g_ed.playing?1:0 ); return; }
 
 	pxtnVOMITPREPARATION prep = {0};
 	prep.flags          |= pxtnVOMITPREPFLAG_loop | pxtnVOMITPREPFLAG_unit_mute;
@@ -1597,6 +1597,13 @@ static void _on_vscroll( GtkAdjustment* adj, gpointer )
 	gtk_widget_queue_draw( g_ed.draw_area );
 }
 
+static guint g_tick_id = 0;
+
+static void _on_window_destroy( GtkWidget*, gpointer )
+{
+	if( g_tick_id ){ g_source_remove( g_tick_id ); g_tick_id = 0; }
+}
+
 static gboolean _tick( gpointer )
 {
 	if( g_ed.playing )
@@ -1701,6 +1708,8 @@ static void _activate( GtkApplication* app, gpointer )
 	} ), NULL );
 	// combined play/stop toggle
 	g_signal_connect( btn_play, "toggled", G_CALLBACK( +[]( GtkToggleButton* b, gpointer ){
+		fprintf( stderr, "[play-btn] toggled active=%d playing=%d\n",
+			gtk_toggle_button_get_active( b ) ? 1 : 0, g_ed.playing ? 1 : 0 );
 		bool active = gtk_toggle_button_get_active( b );
 		if( active && !g_ed.playing ) _start_play();
 		else if( !active && g_ed.playing ) _stop_play();
@@ -1782,7 +1791,8 @@ static void _activate( GtkApplication* app, gpointer )
 	g_signal_connect( key, "key-pressed", G_CALLBACK( _on_key ), NULL );
 	gtk_widget_add_controller( g_ed.window, key );
 
-	g_timeout_add( 33, _tick, NULL );
+	g_tick_id = g_timeout_add( 33, _tick, NULL );
+	g_signal_connect( g_ed.window, "destroy", G_CALLBACK( _on_window_destroy ), NULL );
 
 	gtk_window_present( GTK_WINDOW( g_ed.window ) );
 }
