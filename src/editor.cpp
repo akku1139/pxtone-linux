@@ -2479,6 +2479,16 @@ static void _activate( GtkApplication*, gpointer )
 	g_signal_connect( g_ed.window, "destroy", G_CALLBACK( _on_window_destroy ), NULL );
 
 	gtk_window_present( GTK_WINDOW( g_ed.window ) );
+
+	GtkNative* nat = gtk_widget_get_native( g_ed.window );
+	GdkSurface* surf = nat ? gtk_native_get_surface( nat ) : NULL;
+	if( surf )
+	{
+		fprintf( stderr, "[gsk] surface ok  GSK_RENDERER=%s GDK_DISABLE=%s\n",
+			g_getenv( "GSK_RENDERER" ) ? g_getenv( "GSK_RENDERER" ) : "(unset)",
+			g_getenv( "GDK_DISABLE" ) ? g_getenv( "GDK_DISABLE" ) : "(unset)" );
+	}
+	else fprintf( stderr, "[gsk] no surface\n" );
 }
 
 int main( int argc, char** argv )
