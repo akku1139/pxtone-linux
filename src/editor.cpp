@@ -2412,6 +2412,9 @@ static void _activate( GtkApplication*, gpointer )
 	g_ed.unit_combo = gtk_drop_down_new( G_LIST_MODEL( unit_list ), NULL );
 	gtk_widget_set_size_request( g_ed.unit_combo, 150, -1 );
 	gtk_box_append( GTK_BOX( header ), g_ed.unit_combo );
+	g_signal_connect( g_ed.unit_combo, "notify::selected", G_CALLBACK( +[]( GtkDropDown*, gpointer ){
+		gtk_widget_queue_draw( g_ed.draw_area ); // active-unit highlight follows
+	} ), NULL );
 
 	gtk_box_append( GTK_BOX( header ), gtk_label_new( "snap:" ) );
 	const char* snap_names[ g_snap_num + 1 ];
