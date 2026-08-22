@@ -763,9 +763,10 @@ static void _refresh_unit_combo()
 static void _add_unit()
 {
 	if( !g_ed.loaded ) return;
-	if( !g_ed.pxtn->Unit_AddNew() ){ _set_status( "unit max reached" ); return; }
+	fprintf( stderr, "[+unit] num=%d -> AddNew=%d\n", g_ed.pxtn->Unit_Num(),
+		g_ed.pxtn->Unit_AddNew() ? 1 : 0 );
 	int idx = g_ed.pxtn->Unit_Num() - 1;
-
+	if( idx < 0 || idx <= g_ed.unit_num - 1 ){ _set_status( "unit max reached" ); return; }
 	// assign woice 0 (create one if the tune has none)
 	if( g_ed.pxtn->Woice_Num() == 0 )
 	{
@@ -866,8 +867,8 @@ static bool _build_sound_woice( pxtnWoice* w, int type, int wave, int volume, in
 	if( type == 0 ) // PTV (overtone synthesis, like stock pxTone default tones)
 	{
 		v->type      = pxtnVOICE_Overtone;
-		v->basic_key = 0x4500 << 0; // A4 base (same as stock default 0x4500)
-		v->volume    = 128;
+		v->basic_key = basic_row << 8; // A4 = 0x4500 by default
+		v->volume    = volume;
 		v->pan       = 64;
 		v->tuning    = 1.0f;
 		v->voice_flags = PTV_VOICEFLAG_SMOOTH | PTV_VOICEFLAG_WAVELOOP;
@@ -875,7 +876,6 @@ static bool _build_sound_woice( pxtnWoice* w, int type, int wave, int volume, in
 		v->wave.num    = 8; // max harmonics slot
 		v->wave.points = (pxtnPOINT*)malloc( sizeof( pxtnPOINT ) * 8 );
 		_make_harmonic_points( wave, v->wave.points, &v->wave.num );
-		(void)basic_row; (void)volume; // stock defaults fixed like sample.ptcop
 	}
 	else // PTN noise
 	{
@@ -1093,6 +1093,41 @@ static void _sound_dialog()
 	d->aurlen = gtk_spin_button_new_with_range( 10, 600, 10 );
 	gtk_spin_button_set_value( GTK_SPIN_BUTTON( d->aurlen ), 100 );
 	gtk_grid_attach( GTK_GRID( grid ), d->aurlen, 1, r++, 1, 1 );
+
+	// live updates: redraw canvas & audition on any parameter change
+	auto _live = [d](){
+		gtk_widget_queue_draw( d->wavecanvas );
+		_audition_sound(
+			(int)gtk_drop_down_get_selected( GTK_DROP_DOWN( d->type ) ),
+			(int)gtk_drop_down_get_selected( GTK_DROP_DOWN( d->wave ) ),
+			(int)gtk_range_get_value( GTK_RANGE( d->volume ) ),
+			(int)gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->basic_row ) ),
+			(int)gtk_drop_down_get_selected( GTK_DROP_DOWN( d->ntype ) ),
+			gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->nfreq ) ),
+			gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->noffset ) ),
+			gtk_range_get_value( GTK_RANGE( d->nvol ) ),
+			(int)gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->audkey ) ), -1 );
+	};
+	for( GtkWidget* w : { d->type, d->wave, d->ntype } )
+		g_signal_connect_swapped( w, "notify::selected", G_CALLBACK( +[]( gpointer, gpointer ud ){
+			SoundDlg* dd = (SoundDlg*)ud;
+			gtk_widget_queue_draw( dd->wavecanvas );
+			_audition_sound(
+				(int)gtk_drop_down_get_selected( GTK_DROP_DOWN( dd->type ) ),
+				(int)gtk_drop_down_get_selected( GTK_DROP_DOWN( dd->wave ) ),
+				(int)gtk_range_get_value( GTK_RANGE( dd->volume ) ),
+				(int)gtk_spin_button_get_value( GTK_SPIN_BUTTON( dd->basic_row ) ),
+				(int)gtk_drop_down_get_selected( GTK_DROP_DOWN( dd->ntype ) ),
+				gtk_spin_button_get_value( GTK_SPIN_BUTTON( dd->nfreq ) ),
+				gtk_spin_button_get_value( GTK_SPIN_BUTTON( dd->noffset ) ),
+				gtk_range_get_value( GTK_RANGE( dd->nvol ) ),
+				(int)gtk_spin_button_get_value( GTK_SPIN_BUTTON( dd->audkey ) ), -1 );
+		} ), d );
+	for( GtkWidget* w : { d->volume, d->basic_row, d->nfreq, d->noffset, d->nvol, d->audkey } )
+		g_signal_connect( w, "value-changed", G_CALLBACK( +[]( GtkWidget*, gpointer ud ){
+			SoundDlg* dd = (SoundDlg*)ud;
+			gtk_widget_queue_draw( dd->wavecanvas );
+		} ), d );
 
 	GtkWidget* btn_aud = gtk_button_new_with_label( "audition" );
 	g_signal_connect( btn_aud, "clicked", G_CALLBACK( _on_audition_clicked ), d );
@@ -1751,13 +1786,17 @@ static void _activate( GtkApplication* app, gpointer )
 	GtkWidget* vbox = gtk_box_new( GTK_ORIENTATION_VERTICAL, 0 );
 	gtk_window_set_child( GTK_WINDOW( g_ed.window ), vbox );
 
-	// header controls
+	// header controls (horizontally scrollable when the window is narrow)
 	GtkWidget* hbox = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 6 );
 	gtk_widget_set_margin_start ( hbox, 8 );
 	gtk_widget_set_margin_end   ( hbox, 8 );
 	gtk_widget_set_margin_top   ( hbox, 6 );
 	gtk_widget_set_margin_bottom( hbox, 6 );
-	gtk_box_append( GTK_BOX( vbox ), hbox );
+	GtkWidget* header_sw = gtk_scrolled_window_new();
+	gtk_scrolled_window_set_policy( GTK_SCROLLED_WINDOW( header_sw ),
+		GtkPolicyType::GTK_POLICY_AUTOMATIC, GtkPolicyType::GTK_POLICY_NEVER );
+	gtk_scrolled_window_set_child( GTK_SCROLLED_WINDOW( header_sw ), hbox );
+	gtk_box_append( GTK_BOX( vbox ), header_sw );
 
 	gtk_box_append( GTK_BOX( hbox ), gtk_label_new( "unit:" ) );
 	GtkStringList* unit_list = gtk_string_list_new( NULL );
