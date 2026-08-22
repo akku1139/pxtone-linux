@@ -1548,34 +1548,46 @@ static void _on_drag_begin( GtkGestureDrag* gesture, double x, double y, gpointe
 		return;
 	}
 
-	_clear_selection();
+	// capture selection BEFORE any state change: group move needs it
+	auto selset0 = _selected_notes( unit );
+	const EVERECORD* hit = _find_note( clock, row, unit );
+	bool clicked_selected = hit && selset0.size() > 0;
+	if( hit ) for( auto& t : selset0 )
+		if( t.first == hit->clock && t.second == row ){ clicked_selected = true; break; }
+
 	g_ed.paste_clock   = _snap_clock( clock );
 	g_ed.has_paste_pos = true;
 
-	const EVERECORD* hit = _find_note( clock, row, unit );
 	if( hit )
 	{
+		// keep the selection only when grabbing a note that belongs to it
+		if( !clicked_selected )
+		{
+			_clear_selection();
+			selset0.clear();
+			selset0.push_back( { hit->clock, row } );
+		}
+		else if( !g_ed.has_multi && !g_ed.has_range )
+			selset0.clear(); // plain single click on the already-selected note
+
 		_push_undo();
 
-		// capture the move set: the grabbed note, or every selected note
+		// build the move set
 		g_ed.move_set.clear();
-		auto selset = _selected_notes( unit ); // includes the grabbed note itself
-		if( selset.size() > 1 )
-			for( auto& t : selset )
-			{
-				int32_t dur = g_ed.snap;
-				for( const EVERECORD* q = g_ed.pxtn->evels->get_Records(); q; q = q->next )
-					if( q->kind == EVENTKIND_ON && q->unit_no == unit && q->clock == t.first )
-						{ dur = q->value > 0 ? q->value : g_ed.snap; break; }
-				g_ed.move_set.push_back( { t.first, t.second, dur } );
-			}
-		int hk = g_ed.pxtn->evels->get_Value( hit->clock, (uint8_t)unit, EVENTKIND_KEY ) >> 8;
-		g_ed.move_set.push_back( { hit->clock, hk, hit->value > 0 ? hit->value : g_ed.snap } );
+		for( auto& t : selset0 )
+		{
+			int32_t dur = g_ed.snap;
+			for( const EVERECORD* q = g_ed.pxtn->evels->get_Records(); q; q = q->next )
+				if( q->kind == EVENTKIND_ON && q->unit_no == unit && q->clock == t.first )
+					{ dur = q->value > 0 ? q->value : g_ed.snap; break; }
+			g_ed.move_set.push_back( { t.first, t.second, dur } );
+		}
 
 		double end_x = ( hit->clock + hit->value ) * g_ed.px_per_clock - g_ed.h_offset;
 		// right edge = resize, but only for notes wide enough to click precisely
 		double note_w = hit->value * g_ed.px_per_clock;
-		g_ed.mode          = ( note_w >= 24.0 && x > end_x - 10.0 ) ? DRAG_RESIZE : DRAG_MOVE;
+		bool single_grab = ( g_ed.move_set.size() == 1 );
+	g_ed.mode          = ( single_grab && note_w >= 24.0 && x > end_x - 10.0 ) ? DRAG_RESIZE : DRAG_MOVE;
 		g_ed.dragging      = true;
 		g_ed.drag_unit     = unit;
 		g_ed.drag_orig_clk = hit->clock;
@@ -1592,7 +1604,11 @@ static void _on_drag_begin( GtkGestureDrag* gesture, double x, double y, gpointe
 			unit, hit->clock, g_ed.drag_dur );
 		gtk_widget_queue_draw( g_ed.draw_area ); // show outline immediately
 	}
-	else _add_note( clock, row );
+	else
+	{
+		_clear_selection();
+		_add_note( clock, row );
+	}
 }
 
 static void _on_drag_update( GtkGestureDrag* gesture, double, double, gpointer )
