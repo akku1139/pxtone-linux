@@ -147,6 +147,9 @@ static void _set_repeat_at( int32_t clock );
 static void _set_last_at( int32_t clock );
 static void _on_snap_combo_changed( GtkDropDown* dd, gpointer ); // fwd
 
+// re-run preparation after song-structure changes so Moo honors the new
+// repeat/last settings; keeps the current playback position.
+
 static void _start_play();
 static void _stop_play();
 static void _seek_to( int32_t clock );
@@ -445,6 +448,43 @@ static void _sdl_audio_callback( void*, Uint8* stream, int len )
 static void _seek_to( int32_t clock );
 static void _set_repeat_at( int32_t clock );
 static void _set_last_at( int32_t clock );
+
+// re-run preparation after song-structure changes so Moo honors the new
+// repeat/last settings; keeps the current playback position.
+static int32_t _meas_clock()
+{
+	pxtnMaster* m = g_ed.pxtn->master;
+	int32_t bc = m->get_beat_clock();
+	if( bc <= 0 ) bc = _BEAT_CLOCK;
+	return bc * m->get_beat_num();
+}
+
+static void _reprep_keep_pos()
+{
+	if( !g_ed.loaded || !g_ed.pxtn ) return;
+
+	pxtnMaster* m = g_ed.pxtn->master;
+	int32_t mc = _meas_clock(); if( mc <= 0 ) mc = 1;
+	int32_t play_meas = m->get_last_meas() ? m->get_last_meas() : m->get_meas_num();
+	double total_sec = (double)play_meas * m->get_beat_num() * 60.0 / g_ed.tempo;
+
+	double cur_sec = (double)g_ed.played_samples / _SAMPLE_PER_SECOND;
+	double frac = total_sec > 0 ? MIN( MAX( cur_sec / total_sec, 0.0 ), 0.999 ) : 0;
+
+	bool was = g_ed.playing;
+	if( was )
+	{
+		pxtnVOMITPREPARATION prep = {0};
+		prep.flags          |= pxtnVOMITPREPFLAG_loop | pxtnVOMITPREPFLAG_unit_mute;
+		prep.start_pos_float = (float)frac;
+		prep.master_volume   = 0.80f;
+		if( g_ed.pxtn->moo_preparation( &prep ) )
+		{
+			double total_smp = (double)play_meas * m->get_beat_num() * ( 60.0 / g_ed.tempo ) * _SAMPLE_PER_SECOND;
+			g_ed.played_samples = (int64_t)( frac * total_smp );
+		}
+	}
+}
 
 static void _start_play()
 {
@@ -1181,13 +1221,6 @@ static void _apply_song( double tempo, int beat_num, int32_t beat_clock,
 
 // ---- coordinate helpers -----------------------------------------------------
 
-static int32_t _meas_clock()
-{
-	pxtnMaster* m = g_ed.pxtn->master;
-	int32_t bc = m->get_beat_clock();
-	if( bc <= 0 ) bc = _BEAT_CLOCK;
-	return bc * m->get_beat_num();
-}
 
 // ---- loop marker editing ----------------------------------------------------
 
@@ -1214,6 +1247,7 @@ static void _set_repeat_at( int32_t clock )
 		gtk_spin_button_set_value( GTK_SPIN_BUTTON( g_song_dlg.repeat ), clock / mc + 1 );
 	_set_status( "repeat measure: %d", clock / mc );
 	gtk_widget_queue_draw( g_ed.draw_area );
+	if( g_ed.playing ) _reprep_keep_pos();
 }
 static void _set_last_at( int32_t clock )
 {
@@ -1230,6 +1264,7 @@ static void _set_last_at( int32_t clock )
 		gtk_spin_button_set_value( GTK_SPIN_BUTTON( g_song_dlg.meas ), lm + 1 );
 	_set_status( "last measure end: %d", lm + 1 );
 	gtk_widget_queue_draw( g_ed.draw_area );
+	if( g_ed.playing ) _reprep_keep_pos();
 }
 
 static bool _screen_to_clock_row( int x, int y, int32_t* p_clock, int* p_row )
