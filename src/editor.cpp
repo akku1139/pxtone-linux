@@ -43,6 +43,8 @@ static bool _pxtn_p( void* u, int32_t* p ){ long i = ftell( (FILE*)u ); if( i < 
 
 // ---- editor state -------------------------------------------------------
 
+enum DragMode { DRAG_NONE = 0, DRAG_RESIZE, DRAG_MOVE };
+
 struct Editor
 {
 	pxtnService* pxtn       = NULL;
@@ -63,10 +65,18 @@ struct Editor
 	int32_t drag_clock = 0;
 	int32_t drag_unit  = 0;
 
-	// note resize (drag left/right on an existing note)
-	bool    resizing   = false;
-	int32_t resize_clock = 0;
-	int32_t resize_unit  = 0;
+	// note resize / move (drag left/right on an existing note)
+	DragMode mode        = DRAG_NONE;
+	int32_t drag_orig_clock = 0; // note's original start clock
+	int32_t drag_cur_clock  = 0; // current position while moving
+	int     drag_cur_row    = 0;
+	int32_t drag_dur        = 0;
+	int32_t drag_key        = 0;
+
+	// selection (last touched note)
+	bool    has_sel   = false;
+	int32_t sel_clock = 0;
+	int     sel_unit  = 0;
 
 	// playback
 	std::atomic<int64_t> played_samples {0};
@@ -88,6 +98,60 @@ static Editor g_ed;
 static const double PI = 3.141592653589793;
 
 static void _preview_note( int unit, int row ); // fwd
+
+// ---- undo/redo (event snapshots) ----------------------------------------
+
+static void _set_status( const char* fmt, ... ); // fwd
+
+static std::vector<std::vector<EVERECORD>> g_undo, g_redo;
+
+struct ClipNote { int32_t rel_clock; int unit; int32_t key_row; int32_t dur; };
+static std::vector<ClipNote> g_clipboard;
+
+static std::vector<EVERECORD> _snapshot()
+{
+	std::vector<EVERECORD> recs;
+	for( const EVERECORD* p = g_ed.pxtn->evels->get_Records(); p; p = p->next ) recs.push_back( *p );
+	return recs;
+}
+
+static void _restore_snapshot( const std::vector<EVERECORD>& recs )
+{
+	g_ed.pxtn->evels->Allocate( recs.size() + 4096 );
+	for( const EVERECORD& r : recs )
+		g_ed.pxtn->evels->Record_Add_i( r.clock, r.unit_no, r.kind, r.value );
+}
+
+static void _push_undo()
+{
+	g_undo.push_back( _snapshot() );
+	if( g_undo.size() > 100 ) g_undo.erase( g_undo.begin() );
+	g_redo.clear();
+}
+
+static void _undo()
+{
+	if( g_undo.empty() ) return;
+	g_redo.push_back( _snapshot() );
+	SDL_LockAudio();
+	_restore_snapshot( g_undo.back() );
+	SDL_UnlockAudio();
+	g_undo.pop_back();
+	_set_status( "undo (%d left)", (int)g_undo.size() );
+	gtk_widget_queue_draw( g_ed.draw_area );
+}
+
+static void _redo()
+{
+	if( g_redo.empty() ) return;
+	g_undo.push_back( _snapshot() );
+	SDL_LockAudio();
+	_restore_snapshot( g_redo.back() );
+	SDL_UnlockAudio();
+	g_redo.pop_back();
+	_set_status( "redo" );
+	gtk_widget_queue_draw( g_ed.draw_area );
+}
 
 // ---- helpers ------------------------------------------------------------
 
@@ -223,12 +287,13 @@ static void _add_note( int32_t clock, int row )
 	int32_t c = _snap_clock( clock );
 
 	SDL_LockAudio();
+	_push_undo();
 	_ensure_evels_capacity();
 
 	// set key only if it differs from the effective key at that point
 	if( g_ed.pxtn->evels->get_Value( c, (uint8_t)unit, EVENTKIND_KEY ) != ( row << 8 ) )
 	{
-		g_ed.pxtn->evels->Record_Delete( c, c, (uint8_t)unit, EVENTKIND_KEY );
+		g_ed.pxtn->evels->Record_Delete( c, c + 1, (uint8_t)unit, EVENTKIND_KEY );
 		g_ed.pxtn->evels->Record_Add_i( c, (uint8_t)unit, EVENTKIND_KEY, row << 8 );
 	}
 	g_ed.pxtn->evels->Record_Add_i( c, (uint8_t)unit, EVENTKIND_ON, g_ed.snap );
@@ -239,43 +304,72 @@ static void _add_note( int32_t clock, int row )
 	g_ed.dragging   = true;
 	g_ed.drag_clock = c;
 	g_ed.drag_unit  = unit;
+	g_ed.mode       = DRAG_NONE;
+
+	g_ed.has_sel   = true;
+	g_ed.sel_clock = c;
+	g_ed.sel_unit  = unit;
 
 	gtk_widget_queue_draw( g_ed.draw_area );
 }
 
-static void _drag_update( int x )
+static void _drag_update( int x, int y )
 {
 	pxtnEvelist* ev = g_ed.pxtn->evels;
 	int32_t c = _snap_clock( (int32_t)( ( g_ed.h_offset + x ) / g_ed.px_per_clock ) );
 	int32_t max = ev->get_Max_Clock() + g_ed.snap * 64;
+	if( c < 0 ) c = 0;
 
-	if( g_ed.resizing )
+	if( g_ed.mode == DRAG_RESIZE )
 	{
 		// resize: dragging left/right on an existing note changes its length
-		int32_t dur = c - g_ed.resize_clock;
+		int32_t dur = c - g_ed.drag_orig_clock;
 		if( dur < g_ed.snap ) dur = g_ed.snap;
 		if( dur > max ) dur = max;
 
 		SDL_LockAudio();
-		Record_Value_Set_safe( ev, g_ed.resize_clock, g_ed.resize_unit, dur );
-		_fix_overlaps( g_ed.resize_clock, g_ed.resize_unit, dur );
+		Record_Value_Set_safe( ev, g_ed.drag_orig_clock, g_ed.drag_unit, dur );
+		_fix_overlaps( g_ed.drag_orig_clock, g_ed.drag_unit, dur );
+		SDL_UnlockAudio();
+		g_ed.drag_dur = dur;
+	}
+	else if( g_ed.mode == DRAG_MOVE )
+	{
+		// move: the note follows the cursor (snapped clock + pitch row)
+		int row = _ROW_MAX - (int)floor( ( y + g_ed.v_offset ) / (double)_ROW_H );
+		if( row < _ROW_MIN ) row = _ROW_MIN;
+		if( row > _ROW_MAX ) row = _ROW_MAX;
+		if( c == g_ed.drag_cur_clock && row == g_ed.drag_cur_row ) return;
+
+		SDL_LockAudio();
+		ev->Record_Delete( g_ed.drag_cur_clock, g_ed.drag_cur_clock + 1, (uint8_t)g_ed.drag_unit, EVENTKIND_ON );
+		ev->Record_Delete( g_ed.drag_cur_clock, g_ed.drag_cur_clock + 1, (uint8_t)g_ed.drag_unit, EVENTKIND_KEY );
+		if( ev->get_Value( c, (uint8_t)g_ed.drag_unit, EVENTKIND_KEY ) != ( g_ed.drag_key << 8 ) )
+		{
+			ev->Record_Delete( c, c + 1, (uint8_t)g_ed.drag_unit, EVENTKIND_KEY );
+			ev->Record_Add_i( c, (uint8_t)g_ed.drag_unit, EVENTKIND_KEY, g_ed.drag_key << 8 );
+		}
+		ev->Record_Add_i( c, (uint8_t)g_ed.drag_unit, EVENTKIND_ON, g_ed.drag_dur );
+		_fix_overlaps( c, g_ed.drag_unit, g_ed.drag_dur );
 		SDL_UnlockAudio();
 
-		gtk_widget_queue_draw( g_ed.draw_area );
-		return;
+		g_ed.drag_cur_clock = c;
+		g_ed.drag_cur_row   = row;
 	}
+	else if( g_ed.dragging )
+	{
+		// stretch the note created at drag start
+		int32_t dur = c - g_ed.drag_clock;
+		if( dur < g_ed.snap ) dur = g_ed.snap;
+		if( dur > max ) dur = max;
 
-	if( !g_ed.dragging ) return;
-
-	// stretch the note created at drag start
-	int32_t dur = c - g_ed.drag_clock;
-	if( dur < g_ed.snap ) dur = g_ed.snap;
-	if( dur > max ) dur = max;
-
-	SDL_LockAudio();
-	Record_Value_Set_safe( ev, g_ed.drag_clock, g_ed.drag_unit, dur );
-	_fix_overlaps( g_ed.drag_clock, g_ed.drag_unit, dur );
-	SDL_UnlockAudio();
+		SDL_LockAudio();
+		Record_Value_Set_safe( ev, g_ed.drag_clock, g_ed.drag_unit, dur );
+		_fix_overlaps( g_ed.drag_clock, g_ed.drag_unit, dur );
+		SDL_UnlockAudio();
+		g_ed.drag_dur = dur;
+	}
+	else return;
 
 	gtk_widget_queue_draw( g_ed.draw_area );
 }
@@ -306,7 +400,8 @@ static void _delete_note( int32_t clock, int row )
 	if( !hit ) return;
 
 	SDL_LockAudio();
-	g_ed.pxtn->evels->Record_Delete( hit->clock, hit->clock, (uint8_t)unit, EVENTKIND_ON );
+	_push_undo();
+	g_ed.pxtn->evels->Record_Delete( hit->clock, hit->clock + 1, (uint8_t)unit, EVENTKIND_ON );
 	SDL_UnlockAudio();
 
 	gtk_widget_queue_draw( g_ed.draw_area );
@@ -716,14 +811,28 @@ static void _on_drag_begin( GtkGestureDrag*, double x, double y, gpointer )
 	int unit = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
 	if( unit < 0 || unit >= g_ed.unit_num ) return;
 
-	// existing note -> resize mode; empty cell -> create new note
+	// existing note -> move/resize mode (right edge = resize, body = move);
+	// empty cell -> create new note
 	const EVERECORD* hit = _find_note( clock, row, unit );
 	if( hit )
 	{
-		g_ed.resizing     = true;
-		g_ed.resize_clock = hit->clock;
-		g_ed.resize_unit  = unit;
-		_set_status( "resize: unit=%d clock=%d cur_len=%d", unit, hit->clock, hit->value );
+		_push_undo(); // one history entry per drag gesture
+
+		double note_end_x = ( hit->clock + hit->value ) * g_ed.px_per_clock - g_ed.h_offset;
+		bool on_edge      = ( x > note_end_x - 10.0 );
+
+		g_ed.drag_unit       = unit;
+		g_ed.drag_orig_clock = hit->clock;
+		g_ed.drag_cur_clock  = hit->clock;
+		g_ed.drag_cur_row    = row;
+		g_ed.drag_dur        = hit->value > 0 ? hit->value : g_ed.snap;
+		g_ed.drag_key        = g_ed.pxtn->evels->get_Value( hit->clock, (uint8_t)unit, EVENTKIND_KEY ) >> 8;
+		g_ed.mode            = on_edge ? DRAG_RESIZE : DRAG_MOVE;
+		g_ed.has_sel         = true;
+		g_ed.sel_clock       = hit->clock;
+		g_ed.sel_unit        = unit;
+
+		_set_status( "%s: unit=%d clock=%d len=%d", on_edge ? "resize" : "move", unit, hit->clock, g_ed.drag_dur );
 	}
 	else
 	{
@@ -736,13 +845,13 @@ static void _on_drag_update( GtkGestureDrag* gesture, double, double, gpointer )
 {
 	double x = 0, y = 0;
 	gtk_gesture_get_point( GTK_GESTURE( gesture ), NULL, &x, &y );
-	_drag_update( (int)x ); // follows the mouse while the button is held
+	_drag_update( (int)x, (int)y ); // follows the mouse while the button is held
 }
 
 static void _on_drag_end( GtkGestureDrag*, double, double, gpointer )
 {
 	g_ed.dragging = false;
-	g_ed.resizing = false;
+	g_ed.mode     = DRAG_NONE;
 }
 
 static gboolean _on_scroll( GtkEventControllerScroll*, double dx, double dy, gpointer state )
@@ -779,6 +888,50 @@ static gboolean _on_scroll( GtkEventControllerScroll*, double dx, double dy, gpo
 static gboolean _on_key( GtkEventControllerKey*, guint keyval, guint, GdkModifierType state, gpointer )
 {
 	if( ( state & GDK_CONTROL_MASK ) && keyval == 's' ){ _save(); return TRUE; }
+	if( ( state & GDK_CONTROL_MASK ) && keyval == 'z' ){ _undo(); return TRUE; }
+	if( ( state & GDK_CONTROL_MASK ) && keyval == 'y' ){ _redo(); return TRUE; }
+	if( ( state & GDK_CONTROL_MASK ) && keyval == 'c' )
+	{
+		if( !g_ed.has_sel ){ _set_status( "copy: no note selected" ); return TRUE; }
+		// find the selected note by clock + unit
+		const EVERECORD* p = NULL;
+		for( const EVERECORD* q = g_ed.pxtn->evels->get_Records(); q; q = q->next )
+		{
+			if( q->kind == EVENTKIND_ON && q->unit_no == g_ed.sel_unit && q->clock >= g_ed.sel_clock )
+			{ if( q->clock == g_ed.sel_clock ) p = q; break; }
+		}
+		if( p )
+		{
+			int k = g_ed.pxtn->evels->get_Value( p->clock, (uint8_t)g_ed.sel_unit, EVENTKIND_KEY ) >> 8;
+			g_clipboard.clear();
+			g_clipboard.push_back( { 0, g_ed.sel_unit, k, p->value > 0 ? p->value : g_ed.snap } );
+			_set_status( "copied note (unit=%d key=0x%02x len=%d)", g_ed.sel_unit, k, p->value );
+		}
+		return TRUE;
+	}
+	if( ( state & GDK_CONTROL_MASK ) && keyval == 'v' )
+	{
+		if( g_clipboard.empty() || !g_ed.loaded ){ _set_status( "paste: clipboard empty" ); return TRUE; }
+		SDL_LockAudio();
+		_push_undo();
+		_ensure_evels_capacity();
+		int32_t base = _snap_clock( (int32_t)( g_ed.h_offset / g_ed.px_per_clock ) + g_ed.snap );
+		for( const ClipNote& cn : g_clipboard )
+		{
+			int32_t c = base + cn.rel_clock;
+			if( g_ed.pxtn->evels->get_Value( c, (uint8_t)cn.unit, EVENTKIND_KEY ) != ( cn.key_row << 8 ) )
+			{
+				g_ed.pxtn->evels->Record_Delete( c, c + 1, (uint8_t)cn.unit, EVENTKIND_KEY );
+				g_ed.pxtn->evels->Record_Add_i( c, (uint8_t)cn.unit, EVENTKIND_KEY, cn.key_row << 8 );
+			}
+			g_ed.pxtn->evels->Record_Add_i( c, (uint8_t)cn.unit, EVENTKIND_ON, cn.dur );
+			_fix_overlaps( c, cn.unit, cn.dur );
+		}
+		SDL_UnlockAudio();
+		_set_status( "pasted %d note(s)", (int)g_clipboard.size() );
+		gtk_widget_queue_draw( g_ed.draw_area );
+		return TRUE;
+	}
 	if( keyval == GDK_KEY_space ){ g_ed.playing ? _stop_play() : _start_play(); return TRUE; }
 
 	if( keyval >= '1' && keyval <= '4' )
