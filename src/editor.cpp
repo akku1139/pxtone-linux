@@ -1555,7 +1555,7 @@ static void _apply_move()
 	SDL_UnlockAudio();
 }
 
-static void _on_drag_end( GtkGestureDrag*, double, double, gpointer )
+static void _finish_drag()
 {
 	if( g_ed.mode == DRAG_MOVE ){ _apply_move(); _set_status( "note moved" ); }
 	else if( g_ed.mode == DRAG_RESIZE )
@@ -1578,6 +1578,11 @@ static void _on_drag_end( GtkGestureDrag*, double, double, gpointer )
 	}
 	g_ed.dragging = false;
 	g_ed.mode     = DRAG_NONE;
+}
+
+static void _on_drag_end( GtkGestureDrag*, double, double, gpointer )
+{
+	_finish_drag();
 }
 
 static bool _point_in_range( double x, double y )
@@ -1766,6 +1771,7 @@ static gboolean _on_key( GtkEventControllerKey*, guint keyval, guint, GdkModifie
 // ---- tick -------------------------------------------------------------------
 
 static guint g_tick_id = 0;
+static GtkGesture* g_drag_gest = NULL; // watched by _tick as a safety net
 
 static void _on_window_destroy( GtkWidget*, gpointer )
 {
@@ -1775,6 +1781,10 @@ static void _on_window_destroy( GtkWidget*, gpointer )
 
 static gboolean _tick( gpointer )
 {
+	// safety net: if a drag gesture ended without drag-end firing, finalize now
+	if( g_ed.mode != DRAG_NONE && g_drag_gest && !gtk_gesture_is_active( g_drag_gest ) )
+		_finish_drag();
+
 	if( g_ed.playing )
 	{
 		double sec = (double)g_ed.played_samples / _SAMPLE_PER_SECOND;
@@ -2332,6 +2342,7 @@ static void _activate( GtkApplication*, gpointer )
 	gtk_widget_add_controller( g_ed.draw_area, GTK_EVENT_CONTROLLER( rdrag ) );
 
 	GtkGesture* drag = gtk_gesture_drag_new();
+	g_drag_gest = drag;
 	gtk_gesture_single_set_button( GTK_GESTURE_SINGLE( drag ), GDK_BUTTON_PRIMARY );
 	g_signal_connect( drag, "drag-begin",  G_CALLBACK( _on_drag_begin ),  NULL );
 	g_signal_connect( drag, "drag-update", G_CALLBACK( _on_drag_update ), NULL );
