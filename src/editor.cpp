@@ -1339,24 +1339,6 @@ static void _draw_cb( GtkDrawingArea*, cairo_t* cr, int w, int h, gpointer )
 		}
 	}
 
-	// resize conflicts
-	if( g_ed.mode == DRAG_RESIZE && g_ed.dragging )
-	{
-		int32_t oc = g_ed.drag_orig_clk, dur = g_ed.drag_dur;
-		for( const EVERECORD* p = g_ed.pxtn->evels->get_Records(); p; p = p->next )
-		{
-			if( p->kind != EVENTKIND_ON || p->unit_no != g_ed.drag_unit ) continue;
-			if( p->clock <= oc || p->clock >= oc + dur ) continue;
-			int k = g_ed.pxtn->evels->get_Value( p->clock, (uint8_t)p->unit_no, EVENTKIND_KEY ) >> 8;
-			double y = ( _ROW_MAX - MIN( MAX( k, _ROW_MIN ), _ROW_MAX ) ) * _ROW_H - g_ed.v_offset;
-			double x0 = p->clock * g_ed.px_per_clock - g_ed.h_offset;
-			double x1 = ( p->clock + p->value ) * g_ed.px_per_clock - g_ed.h_offset;
-			cairo_set_source_rgb( cr, 1, 0.2, 0.2 );
-			cairo_set_line_width( cr, 2 );
-			cairo_rectangle( cr, x0, y + 1, x1 - x0, _ROW_H - 2 ); cairo_stroke( cr );
-			cairo_set_line_width( cr, 1.0 );
-		}
-	}
 
 	// white outline on every selected note
 	{
