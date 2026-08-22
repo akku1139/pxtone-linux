@@ -327,7 +327,14 @@ static void _sdl_audio_callback( void*, Uint8* stream, int len )
 
 static void _start_play()
 {
-	if( !g_ed.loaded || g_ed.playing ){ fprintf( stderr, "[play] skipped (loaded=%d playing=%d)\n", g_ed.loaded?1:0, g_ed.playing?1:0 ); return; }
+	if( !g_ed.loaded || g_ed.playing )
+	{
+		fprintf( stderr, "[play] skipped (loaded=%d playing=%d)\n", g_ed.loaded?1:0, g_ed.playing?1:0 );
+		// keep the toggle consistent with the actual state
+		if( g_ed.tb_play && gtk_toggle_button_get_active( g_ed.tb_play ) )
+			gtk_toggle_button_set_active( g_ed.tb_play, FALSE );
+		return;
+	}
 
 	pxtnVOMITPREPARATION prep = {0};
 	prep.flags          |= pxtnVOMITPREPFLAG_loop | pxtnVOMITPREPFLAG_unit_mute;
@@ -1833,6 +1840,7 @@ static bool _init_new_project()
 	g_undo.clear(); g_redo.clear(); g_clipboard.clear();
 	g_ed.has_sel = false; g_ed.dragging = false; g_ed.mode = DRAG_NONE;
 	g_ed.unit_num = 1; g_ed.tempo = 120.0;
+	g_ed.loaded = true; // the fresh project is playable
 	g_ed.path.clear();
 	g_ed.h_offset = 0; g_ed.v_offset = 0;
 	return true;
