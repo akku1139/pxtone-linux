@@ -548,8 +548,10 @@ static void _seek_to( int32_t clock )
 	prep.flags          |= pxtnVOMITPREPFLAG_loop | pxtnVOMITPREPFLAG_unit_mute;
 	prep.start_pos_float = (float)frac;
 	prep.master_volume   = 0.80f;
-	if( g_ed.pxtn->moo_preparation( &prep ) )
-		g_ed.played_samples = (int64_t)( frac * total );
+	SDL_LockAudio();
+	bool ok = g_ed.pxtn->moo_preparation( &prep );
+	SDL_UnlockAudio();
+	if( ok ) g_ed.played_samples = (int64_t)( frac * total );
 	else
 		g_ed.playing = false;
 	gtk_widget_queue_draw( g_ed.draw_area );
