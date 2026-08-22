@@ -1659,6 +1659,7 @@ static void _finish_drag()
 	}
 	g_ed.dragging = false;
 	g_ed.mode     = DRAG_NONE;
+	gtk_widget_queue_draw( g_ed.draw_area ); // damage was stale without this
 }
 
 static void _on_drag_end( GtkGestureDrag*, double, double, gpointer )
