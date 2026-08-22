@@ -12,8 +12,10 @@ pxtoneの非公式なLinux移植です。オリジナルは [pxtone-play-sample 
 ## pxtone-editor (GTK4)
 
 ```sh
-./build/pxtone-editor <file.ptcop>
+./build/pxtone-editor [file.ptcop]
 ```
+
+ファイル名を省略、または存在しないファイルを指定した場合は新規曲が自動作成されます。
 
 ### ノート編集
 - 左クリック(空きセル): ノート設置+プレビュー音。そのままドラッグで長さ調整

@@ -90,6 +90,7 @@ struct Editor
 	// widgets
 	GtkWidget* window    = NULL;
 	GtkWidget* draw_area = NULL;
+	GtkAdjustment *hadj = NULL, *vadj = NULL;
 	GtkWidget* unit_combo = NULL;
 	GtkWidget* snap_combo = NULL;
 	GtkWidget* status     = NULL;
@@ -191,6 +192,7 @@ static void _set_status( const char* fmt, ... )
 	va_list ap; va_start( ap, fmt );
 	vsnprintf( buf, sizeof( buf ), fmt, ap );
 	va_end( ap );
+	if( !GTK_IS_LABEL( g_ed.status ) ){ fprintf( stderr, "%s\n", buf ); return; } // widgets not ready yet
 	gtk_label_set_text( GTK_LABEL( g_ed.status ), buf );
 }
 
@@ -273,20 +275,22 @@ static void _sdl_audio_callback( void*, Uint8* stream, int len )
 
 	// mix queued preview samples on top (works before the first Play)
 	int16_t* out = (int16_t*)stream;
-	size_t   frames  = len / ( _CHANNEL_NUM * sizeof(int16_t) );
-	size_t   cap     = g_ed.pv_buf.size() / _CHANNEL_NUM;
-	uint64_t rd      = g_ed.pv_read;
-	uint64_t wr      = g_ed.pv_write;
-	for( size_t f = 0; f < frames && rd + _CHANNEL_NUM <= wr; f++ )
+	size_t   frames = len / ( _CHANNEL_NUM * sizeof(int16_t) );
+	size_t   capf   = g_ed.pv_buf.size() / _CHANNEL_NUM; // capacity in frames
+	uint64_t rd     = g_ed.pv_read;
+	uint64_t wr     = g_ed.pv_write;
+	for( size_t f = 0; f < frames; f++ )
 	{
+		if( rd >= wr ) break;
+		const int16_t* ps = &g_ed.pv_buf[ ( rd % capf ) * _CHANNEL_NUM ];
 		for( int c = 0; c < _CHANNEL_NUM; c++ )
 		{
-			double s = out[ f * _CHANNEL_NUM + c ] / 32768.0 + g_ed.pv_buf[ (rd % cap) * _CHANNEL_NUM + c ] / 32768.0;
+			double s = out[ f * _CHANNEL_NUM + c ] / 32768.0 + ps[ c ] / 32768.0;
 			if( s >  1 ) s =  1;
 			if( s < -1 ) s = -1;
 			out[ f * _CHANNEL_NUM + c ] = (int16_t)( s * 32767 );
-			rd++;
 		}
+		rd++;
 	}
 	g_ed.pv_read = rd;
 }
@@ -515,36 +519,15 @@ static void _make_wave_points( int type, pxtnPOINT* pts, int32_t* p_num ); // fw
 
 // ---- new tune ------------------------------------------------------------
 
+static bool _init_new_project(); // fwd (defined near _load_tune)
+
 static void _new_tune()
 {
 	SDL_PauseAudio( 1 );
 	SDL_LockAudio();
-	delete g_ed.pxtn;
-	g_ed.pxtn = new pxtnService( _pxtn_r, _pxtn_w, _pxtn_s, _pxtn_p );
-	g_ed.err.clear();
-	if( g_ed.pxtn->init() != pxtnOK ){ g_ed.err = "init failed"; SDL_UnlockAudio(); return; }
-	g_ed.pxtn->set_destination_quality( _CHANNEL_NUM, _SAMPLE_PER_SECOND );
-	g_ed.pxtn->master->Set( 4, 120.0f, _BEAT_CLOCK );
-	g_ed.pxtn->master->set_meas_num   ( 32 );
-	g_ed.pxtn->master->set_last_meas  ( 31 );
-	g_ed.pxtn->evels->Allocate( 8192 );
-	g_ed.pxtn->Unit_AddNew();
-	int w = g_ed.pxtn->Woice_AddNew();
-	pxtnWoice* wv = g_ed.pxtn->Woice_Get_variable( w );
-	wv->Voice_Allocate( 1 );
-	pxtnVOICEUNIT* v = wv->get_voice_variable( 0 );
-	v->type = pxtnVOICE_Coodinate; v->basic_key = 0x6000; v->volume = 100;
-	v->wave.reso = 10000;
-	v->wave.points = (pxtnPOINT*)malloc( sizeof( pxtnPOINT ) * 32 );
-	_make_wave_points( 0, v->wave.points, &v->wave.num ); // sine
+	bool ok = _init_new_project();
 	SDL_UnlockAudio();
-
-	// reset editor state
-	g_undo.clear(); g_redo.clear(); g_clipboard.clear();
-	g_ed.has_sel = false; g_ed.dragging = false; g_ed.mode = DRAG_NONE;
-	g_ed.unit_num = 1; g_ed.tempo = 120.0; g_ed.loaded = true;
-	g_ed.path.clear();
-	g_ed.h_offset = 0; g_ed.v_offset = 0;
+	if( !ok ) return;
 
 	_refresh_unit_combo();
 	_set_status( "new tune created (unsaved)" );
@@ -602,14 +585,15 @@ static void _preview_woice( const pxtnWoice* woice, int row )
 		out[ i ] = (int16_t)( s * 32767 );
 	}
 
-	// append to the preview FIFO (drop oldest if full)
-	size_t cap = g_ed.pv_buf.size();
-	if( cap == 0 ) return;
-	for( size_t i = 0; i < out.size(); i++ )
+	// append to the preview FIFO (frame-based ring; drop oldest if full)
+	size_t capf = g_ed.pv_buf.size() / _CHANNEL_NUM;
+	if( capf == 0 ) return;
+	for( int i = 0; i < dur_frames; i++ )
 	{
 		uint64_t wr = g_ed.pv_write;
-		if( wr - g_ed.pv_read >= cap ) g_ed.pv_read = wr - cap + 1;
-		g_ed.pv_buf[ wr % cap ] = out[ i ];
+		if( wr - g_ed.pv_read >= capf ) g_ed.pv_read = wr - capf + 1;
+		g_ed.pv_buf[ ( wr % capf ) * 2 + 0 ] = out[ i * 2 + 0 ];
+		g_ed.pv_buf[ ( wr % capf ) * 2 + 1 ] = out[ i * 2 + 1 ];
 		g_ed.pv_write = wr + 1;
 	}
 }
@@ -1439,6 +1423,40 @@ static gboolean _on_key( GtkEventControllerKey*, guint keyval, guint, GdkModifie
 	return FALSE;
 }
 
+static void _sync_scrollbars()
+{
+	if( !g_ed.hadj || !g_ed.draw_area ) return;
+	GtkAllocation alloc;
+	gtk_widget_get_allocation( g_ed.draw_area, &alloc );
+
+	double h_upper = ( g_ed.pxtn ? ( g_ed.pxtn->evels->get_Max_Clock() + 4800 * 8 ) : 4800 * 32 ) * g_ed.px_per_clock;
+	double v_upper = ( _ROW_MAX - _ROW_MIN + 1 ) * (double)_ROW_H;
+
+	double hw = alloc.width > 1 ? alloc.width : 100;
+	double vh = alloc.height > 1 ? alloc.height : 100;
+
+	g_object_freeze_notify( G_OBJECT( g_ed.hadj ) );
+	gtk_adjustment_configure( g_ed.hadj, g_ed.h_offset, 0, h_upper + hw * 0.5, 40, hw * 0.8, hw );
+	g_object_thaw_notify( G_OBJECT( g_ed.hadj ) );
+	g_object_freeze_notify( G_OBJECT( g_ed.vadj ) );
+	gtk_adjustment_configure( g_ed.vadj, g_ed.v_offset, 0, v_upper, 40, vh * 0.8, vh );
+	g_object_thaw_notify( G_OBJECT( g_ed.vadj ) );
+}
+
+static void _on_hscroll( GtkAdjustment* adj, gpointer )
+{
+	g_ed.h_offset = gtk_adjustment_get_value( adj );
+	if( g_ed.h_offset < 0 ) g_ed.h_offset = 0;
+	gtk_widget_queue_draw( g_ed.draw_area );
+}
+
+static void _on_vscroll( GtkAdjustment* adj, gpointer )
+{
+	g_ed.v_offset = gtk_adjustment_get_value( adj );
+	if( g_ed.v_offset < 0 ) g_ed.v_offset = 0;
+	gtk_widget_queue_draw( g_ed.draw_area );
+}
+
 static gboolean _tick( gpointer )
 {
 	if( g_ed.playing )
@@ -1455,6 +1473,7 @@ static gboolean _tick( gpointer )
 		}
 		gtk_widget_queue_draw( g_ed.draw_area );
 	}
+	_sync_scrollbars();
 	return G_SOURCE_CONTINUE;
 }
 
@@ -1544,7 +1563,20 @@ static void _activate( GtkApplication* app, gpointer )
 	g_ed.draw_area = gtk_drawing_area_new();
 	gtk_drawing_area_set_draw_func( GTK_DRAWING_AREA( g_ed.draw_area ), _draw_cb, NULL, NULL );
 	gtk_widget_set_vexpand( g_ed.draw_area, TRUE );
-	gtk_box_append( GTK_BOX( vbox ), g_ed.draw_area );
+
+	// scrollbars (kept in sync with h_offset / v_offset)
+	g_ed.hadj = GTK_ADJUSTMENT( gtk_adjustment_new( 0, 0, 100000, 40, 200, 200 ) );
+	g_ed.vadj = GTK_ADJUSTMENT( gtk_adjustment_new( 0, 0, 1600, 40, 200, 200 ) );
+	g_signal_connect( g_ed.hadj, "value-changed", G_CALLBACK( _on_hscroll ), NULL );
+	g_signal_connect( g_ed.vadj, "value-changed", G_CALLBACK( _on_vscroll ), NULL );
+
+	GtkWidget* center = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 0 );
+	gtk_box_append( GTK_BOX( center ), g_ed.draw_area );
+	gtk_widget_set_vexpand( g_ed.draw_area, TRUE );
+	gtk_box_append( GTK_BOX( center ), gtk_scrollbar_new( GTK_ORIENTATION_VERTICAL, g_ed.vadj ) );
+	gtk_widget_set_vexpand( center, TRUE );
+	gtk_box_append( GTK_BOX( vbox ), center );
+	gtk_box_append( GTK_BOX( vbox ), gtk_scrollbar_new( GTK_ORIENTATION_HORIZONTAL, g_ed.hadj ) );
 
 	// right-click drag: delete notes under the cursor (continuously)
 	GtkGesture* rdrag = gtk_gesture_drag_new();
@@ -1581,41 +1613,80 @@ static void _activate( GtkApplication* app, gpointer )
 
 // ---- load ---------------------------------------------------------------
 
+// Build a fresh default project in memory (no widgets touched).
+static bool _init_new_project()
+{
+	delete g_ed.pxtn;
+	g_ed.pxtn = new pxtnService( _pxtn_r, _pxtn_w, _pxtn_s, _pxtn_p );
+	if( g_ed.pxtn->init() != pxtnOK ) return false;
+	if( !g_ed.pxtn->set_destination_quality( _CHANNEL_NUM, _SAMPLE_PER_SECOND ) ) return false;
+	g_ed.pxtn->master->Set( 4, 120.0f, _BEAT_CLOCK );
+	g_ed.pxtn->master->set_meas_num   ( 32 );
+	g_ed.pxtn->master->set_last_meas  ( 31 );
+	g_ed.pxtn->evels->Allocate( 8192 );
+	g_ed.pxtn->Unit_AddNew();
+	int w = g_ed.pxtn->Woice_AddNew();
+	pxtnWoice* wv = g_ed.pxtn->Woice_Get_variable( w );
+	wv->Voice_Allocate( 1 );
+	pxtnVOICEUNIT* v = wv->get_voice_variable( 0 );
+	v->type = pxtnVOICE_Coodinate; v->basic_key = 0x6000; v->volume = 100;
+	v->wave.reso = 10000;
+	v->wave.points = (pxtnPOINT*)malloc( sizeof( pxtnPOINT ) * 32 );
+	_make_wave_points( 0, v->wave.points, &v->wave.num ); // sine
+
+	// reset editor state
+	g_undo.clear(); g_redo.clear(); g_clipboard.clear();
+	g_ed.has_sel = false; g_ed.dragging = false; g_ed.mode = DRAG_NONE;
+	g_ed.unit_num = 1; g_ed.tempo = 120.0;
+	g_ed.path.clear();
+	g_ed.h_offset = 0; g_ed.v_offset = 0;
+	return true;
+}
+
 static bool _load_tune()
 {
-	pxtnService* pxtn = new pxtnService( _pxtn_r, _pxtn_w, _pxtn_s, _pxtn_p );
-	g_ed.pxtn = pxtn;
+	bool need_new = g_ed.path.empty();
 
-	pxtnERR err = pxtn->init();
-	if( err != pxtnOK ){ g_ed.err = pxtnError_get_string( err ); return false; }
-	if( !pxtn->set_destination_quality( _CHANNEL_NUM, _SAMPLE_PER_SECOND ) ){ g_ed.err = "set_destination_quality"; return false; }
+	if( !need_new )
+	{
+		pxtnService* pxtn = new pxtnService( _pxtn_r, _pxtn_w, _pxtn_s, _pxtn_p );
+		g_ed.pxtn = pxtn;
 
-	FILE* fp = fopen( g_ed.path.c_str(), "rb" );
-	if( !fp ){ g_ed.err = "cannot open " + g_ed.path; return false; }
-	err = pxtn->read( fp );
-	fclose( fp );
-	if( err != pxtnOK ){ g_ed.err = pxtnError_get_string( err ); return false; }
+		pxtnERR err = pxtn->init();
+		if( err == pxtnOK ) err = pxtn->set_destination_quality( _CHANNEL_NUM, _SAMPLE_PER_SECOND ) ? pxtnOK : pxtnERR_INIT;
 
-	err = pxtn->tones_ready();
-	if( err != pxtnOK ){ g_ed.err = pxtnError_get_string( err ); return false; }
+		FILE* fp = NULL;
+		if( err == pxtnOK && !( fp = fopen( g_ed.path.c_str(), "rb" ) ) )
+			{ err = pxtnERR_desc_r; }
+		if( err == pxtnOK ){ err = pxtn->read( fp ); fclose( fp ); }
+		if( err == pxtnOK && ( err = pxtn->tones_ready() ) != pxtnOK ){}
 
-	_ensure_evels_capacity();
+		if( err != pxtnOK )
+		{
+			// missing / broken file: fall back to a fresh project
+			char msg[ 512 ];
+			snprintf( msg, sizeof( msg ), "cannot load '%s' (%s) - creating new tune",
+				g_ed.path.c_str(), pxtnError_get_string( err ) );
+			_set_status( "%s", msg );
+		}
+		else
+		{
+			_ensure_evels_capacity();
+			g_ed.unit_num = pxtn->Unit_Num();
+			g_ed.tempo    = pxtn->master->get_beat_tempo();
+			if( g_ed.tempo <= 0 ) g_ed.tempo = EVENTDEFAULT_BEATTEMPO;
+			g_ed.loaded = true;
+			return true;
+		}
+	}
 
-	g_ed.unit_num = pxtn->Unit_Num();
-	g_ed.tempo    = pxtn->master->get_beat_tempo();
-	if( g_ed.tempo <= 0 ) g_ed.tempo = EVENTDEFAULT_BEATTEMPO;
-	g_ed.loaded = true;
+	if( !_init_new_project() ){ g_ed.err = "failed to create new project"; return false; }
 	return true;
 }
 
 int main( int argc, char** argv )
 {
-	if( argc < 2 )
-	{
-		fprintf( stderr, "usage: %s <file.ptcop>\n", argv[0] );
-		return 1;
-	}
-	g_ed.path = argv[1];
+	if( argc >= 2 ) g_ed.path = argv[1]; // no argument: start a new tune
 
 	if( SDL_Init( SDL_INIT_AUDIO ) != 0 )
 	{
