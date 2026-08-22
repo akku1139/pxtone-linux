@@ -34,12 +34,16 @@ tempo / beats per measure / clock per beat / measures / repeat measure / last me
 ### 音源・トラック
 - **+unit**: トラック追加(自動でwoice割り当て)
 - **rename**: ユニット名変更
-- **sound...**: PTV波形(sine/saw/square/triangle/pulse)/ PTNノイズ作成→ユニット割り当て+プレビュー
+- **sound...**: PTV波形(sine/saw/square/triangle/pulse)/ PTNノイズ作成→ユニット割り当て+プレビュー。**audition** ボタンで保存せずに音を試聴
 
 ### 操作
+- **new**: 新規曲作成(無題.ptcopとして保存可能)/ **save as...**: 名前を付けて保存 / Ctrl+S: 上書き保存
+- **undo / redo** ボタンまたは Ctrl+Z/Y: 直近の操作を取り消し/やり直し(再生中も安全)
 - ホイール: 縦スクロール / Shift+ホイール: 横スクロール / Ctrl+ホイール: ズーム
 - Space / ▶■ボタン: 再生/停止、Ctrl+S: 上書き保存(.ptcop)
 - キー 1-4: スナップ(4分/8分/16分/32分)
+- 選択中ユニットのノートが通常色、他ユニットは薄く表示されます
+- song...設定のリピート小節(緑線)・ラスト小節(赤線)はグリッドに表示されます
 
 ## 変更点
 
