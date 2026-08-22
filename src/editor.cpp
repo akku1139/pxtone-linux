@@ -47,7 +47,7 @@ static bool _pxtn_p( void* u, int32_t* o )
 	return true;
 }
 
-enum DragMode { DRAG_NONE = 0, DRAG_STRETCH, DRAG_RESIZE, DRAG_MOVE };
+enum DragMode { DRAG_NONE = 0, DRAG_STRETCH, DRAG_RESIZE, DRAG_MOVE, DRAG_RANGE };
 
 struct Editor
 {
@@ -78,6 +78,12 @@ struct Editor
 	bool    has_sel   = false;
 	int32_t sel_clock = 0;
 	int     sel_unit  = 0;
+	int     sel_row   = 0;
+
+	// range selection (shift-drag)
+	bool    has_range = false;
+	int32_t rg_c0 = 0, rg_c1 = 0;
+	int     rg_r0 = 0, rg_r1 = 0;
 
 	// playback
 	std::atomic<int64_t> played_samples {0};
@@ -714,6 +720,7 @@ static void _add_note( int32_t clock, int row )
 	g_ed.has_sel    = true;
 	g_ed.sel_clock  = c;
 	g_ed.sel_unit   = unit;
+	g_ed.sel_row    = row;
 	gtk_widget_queue_draw( g_ed.draw_area );
 }
 
@@ -738,6 +745,17 @@ static void _drag_update( int x, int y )
 	int32_t c = _snap_clock( (int32_t)( ( g_ed.h_offset + x ) / g_ed.px_per_clock ) );
 	int32_t max = ev->get_Max_Clock() + g_ed.snap * 64;
 	if( c < 0 ) c = 0;
+
+	if( g_ed.mode == DRAG_RANGE )
+	{
+		int32_t clock2; int row2;
+		if( _screen_to_clock_row( (int)x, (int)y, &clock2, &row2 ) )
+		{
+			g_ed.rg_c1 = clock2; g_ed.rg_r1 = row2;
+			gtk_widget_queue_draw( g_ed.draw_area );
+		}
+		return;
+	}
 
 	if( g_ed.mode == DRAG_RESIZE )
 	{
@@ -1199,6 +1217,42 @@ static void _draw_cb( GtkDrawingArea*, cairo_t* cr, int w, int h, gpointer )
 		}
 	}
 
+	// selected note outline
+	if( g_ed.has_sel && g_ed.pxtn )
+	{
+		const EVERECORD* p = NULL;
+		for( const EVERECORD* q = g_ed.pxtn->evels->get_Records(); q; q = q->next )
+		{
+			if( q->kind == EVENTKIND_ON && q->unit_no == g_ed.sel_unit && q->clock >= g_ed.sel_clock )
+				{ if( q->clock == g_ed.sel_clock ) p = q; break; }
+		}
+		if( p )
+		{
+			double x0 = p->clock * g_ed.px_per_clock - g_ed.h_offset;
+			double x1 = ( p->clock + ( p->value > 0 ? p->value : g_ed.snap ) ) * g_ed.px_per_clock - g_ed.h_offset;
+			double y = ( _ROW_MAX - MIN( MAX( g_ed.sel_row, _ROW_MIN ), _ROW_MAX ) ) * _ROW_H - g_ed.v_offset;
+			cairo_set_source_rgb( cr, 1, 1, 1 );
+			cairo_set_line_width( cr, 2 );
+			cairo_rectangle( cr, x0, y + 1, x1 - x0, _ROW_H - 2 ); cairo_stroke( cr );
+			cairo_set_line_width( cr, 1.0 );
+		}
+	}
+
+	// range rectangle
+	if( g_ed.has_range || g_ed.mode == DRAG_RANGE )
+	{
+		int32_t ca = MIN( g_ed.rg_c0, g_ed.rg_c1 ), cb = MAX( g_ed.rg_c0, g_ed.rg_c1 );
+		int    ra = MIN( g_ed.rg_r0, g_ed.rg_r1 ), rb = MAX( g_ed.rg_r0, g_ed.rg_r1 );
+		double x0 = ca * g_ed.px_per_clock - g_ed.h_offset;
+		double x1 = cb * g_ed.px_per_clock - g_ed.h_offset;
+		double y0 = ( _ROW_MAX - rb + 1 ) * _ROW_H - g_ed.v_offset;
+		double y1 = ( _ROW_MAX - ra + 1 ) * _ROW_H - g_ed.v_offset;
+		cairo_set_source_rgba( cr, 1, 1, 1, 0.12 );
+		cairo_rectangle( cr, x0, y0, x1 - x0, y1 - y0 ); cairo_fill( cr );
+		cairo_set_source_rgb( cr, 0.9, 0.9, 0.9 );
+		cairo_rectangle( cr, x0, y0, x1 - x0, y1 - y0 ); cairo_stroke( cr );
+	}
+
 	if( g_ed.playing )
 	{
 		double sec = (double)g_ed.played_samples / _SAMPLE_PER_SECOND;
@@ -1252,12 +1306,25 @@ static void _on_vscroll( GtkAdjustment* adj, gpointer )
 
 // ---- input ------------------------------------------------------------------
 
-static void _on_drag_begin( GtkGestureDrag*, double x, double y, gpointer )
+static void _on_drag_begin( GtkGestureDrag* gesture, double x, double y, gpointer )
 {
+	GdkModifierType mod = gtk_event_controller_get_current_event_state( GTK_EVENT_CONTROLLER( gesture ) );
 	int32_t clock; int row;
-	if( !_screen_to_clock_row( (int)x, (int)y, &clock, &row ) ) return;
+	if( !_screen_to_clock_row( (int)x, (int)y, &clock, &row ) ){ g_ed.has_range = false; return; }
 	int unit = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
 	if( unit < 0 || unit >= g_ed.unit_num ) return;
+
+	if( mod & GDK_SHIFT_MASK )
+	{
+		// range selection mode (applies to the selected unit)
+		g_ed.mode      = DRAG_RANGE;
+		g_ed.dragging  = true;
+		g_ed.rg_c0 = g_ed.rg_c1 = clock;
+		g_ed.rg_r0 = g_ed.rg_r1 = row;
+		g_ed.sel_unit  = unit;
+		return;
+	}
+	g_ed.has_range = false;
 
 	const EVERECORD* hit = _find_note( clock, row, unit );
 	if( hit )
@@ -1274,6 +1341,7 @@ static void _on_drag_begin( GtkGestureDrag*, double x, double y, gpointer )
 		g_ed.has_sel       = true;
 		g_ed.sel_clock     = hit->clock;
 		g_ed.sel_unit      = unit;
+		g_ed.sel_row       = g_ed.drag_key;
 		_set_status( "%s: unit=%d clock=%d len=%d", g_ed.mode == DRAG_RESIZE ? "resize" : "move",
 			unit, hit->clock, g_ed.drag_dur );
 	}
@@ -1289,6 +1357,18 @@ static void _on_drag_update( GtkGestureDrag* gesture, double, double, gpointer )
 
 static void _on_drag_end( GtkGestureDrag*, double, double, gpointer )
 {
+	if( g_ed.mode == DRAG_RANGE )
+	{
+		int32_t c0 = MIN( g_ed.rg_c0, g_ed.rg_c1 ) / g_ed.snap * g_ed.snap;
+		int32_t c1 = ( MAX( g_ed.rg_c0, g_ed.rg_c1 ) + g_ed.snap ) / g_ed.snap * g_ed.snap;
+		g_ed.rg_c0 = c0; g_ed.rg_c1 = c1;
+		g_ed.has_range = true;
+		int n = 0;
+		for( const EVERECORD* p = g_ed.pxtn->evels->get_Records(); p; p = p->next )
+			if( p->kind == EVENTKIND_ON && p->unit_no == g_ed.sel_unit
+				&& p->clock >= c0 && p->clock < c1 ) n++;
+		_set_status( "range selected (%d notes) - Del: delete, Ctrl+C: copy", n );
+	}
 	g_ed.dragging = false;
 	g_ed.mode     = DRAG_NONE;
 }
@@ -1333,8 +1413,45 @@ static gboolean _on_key( GtkEventControllerKey*, guint keyval, guint, GdkModifie
 	if( ( state & GDK_CONTROL_MASK ) && keyval == 'z' ){ _undo(); return TRUE; }
 	if( ( state & GDK_CONTROL_MASK ) && keyval == 'y' ){ _redo(); return TRUE; }
 
+	if( keyval == GDK_KEY_Delete || keyval == GDK_KEY_BackSpace )
+	{
+		int unit = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
+		SDL_LockAudio();
+		_push_undo();
+		if( g_ed.has_range )
+		{
+			int n = g_ed.pxtn->evels->Record_Delete(
+				MIN(g_ed.rg_c0,g_ed.rg_c1), MAX(g_ed.rg_c0,g_ed.rg_c1), (uint8_t)unit, EVENTKIND_ON );
+			_set_status( "deleted %d notes in range (unit %d)", n, unit );
+		}
+		else if( g_ed.has_sel )
+		{
+			int nn = g_ed.pxtn->evels->Record_Delete(
+				g_ed.sel_clock, g_ed.sel_clock + 1, (uint8_t)g_ed.sel_unit, EVENTKIND_ON );
+			_set_status( "deleted %d note(s)", nn );
+		}
+		SDL_UnlockAudio();
+		gtk_widget_queue_draw( g_ed.draw_area );
+		return TRUE;
+	}
+
 	if( ( state & GDK_CONTROL_MASK ) && keyval == 'c' )
 	{
+		// range copy: every note of the selected unit inside the rectangle
+		if( g_ed.has_range )
+		{
+			int32_t c0 = MIN( g_ed.rg_c0, g_ed.rg_c1 ), c1 = MAX( g_ed.rg_c0, g_ed.rg_c1 );
+			g_clipboard.clear();
+			for( const EVERECORD* q = g_ed.pxtn->evels->get_Records(); q; q = q->next )
+			{
+				if( q->kind != EVENTKIND_ON || q->unit_no != g_ed.sel_unit ) continue;
+				if( q->clock < c0 || q->clock >= c1 ) continue;
+				int k = g_ed.pxtn->evels->get_Value( q->clock, (uint8_t)q->unit_no, EVENTKIND_KEY ) >> 8;
+				g_clipboard.push_back( { q->clock - c0, q->unit_no, k, q->value > 0 ? q->value : g_ed.snap } );
+			}
+			_set_status( "copied %d notes from range", (int)g_clipboard.size() );
+			return g_clipboard.empty() ? TRUE : TRUE;
+		}
 		if( !g_ed.has_sel ) return TRUE;
 		const EVERECORD* p = NULL;
 		for( const EVERECORD* q = g_ed.pxtn->evels->get_Records(); q; q = q->next )
