@@ -86,6 +86,8 @@ struct Editor
 	std::vector<SelNote> multi;
 	bool    has_pstart   = false;
 	int32_t pstart_clock = 0;
+	bool has_paste_pos = false;
+	int32_t paste_clock = 0;
 
 	// range selection (shift-drag)
 	bool    has_range = false;
@@ -109,6 +111,7 @@ struct Editor
 	GtkWidget* units_list  = NULL;
 	GtkWidget* units_stats = NULL;
 	GtkWidget* rename_entry= NULL;
+	GtkWidget* snap_combo = NULL;
 
 	// widgets
 	GtkWidget* window    = NULL;
@@ -135,11 +138,13 @@ static void _units_refresh();
 static void _add_unit();
 static void _preview_note( int unit, int row, int32_t clock, int dur_frames = -1 );
 static void _preview_woice( const pxtnWoice* woice, int row, int dur_frames_arg );
-static void _seek_to( int32_t clock ); // fwd
+static void _seek_to( int32_t clock );
+static void _on_snap_combo_changed( GtkDropDown* dd, gpointer ); // fwd
 
 static void _start_play();
 static void _stop_play();
 static void _seek_to( int32_t clock );
+static void _on_snap_combo_changed( GtkDropDown* dd, gpointer );
 static void _save();
 static void _save_as_dialog();
 static void _delete_unit( int idx );
@@ -427,7 +432,8 @@ static void _sdl_audio_callback( void*, Uint8* stream, int len )
 	g_ed.pv_read = rd;
 }
 
-static void _seek_to( int32_t clock ); // fwd
+static void _seek_to( int32_t clock );
+static void _on_snap_combo_changed( GtkDropDown* dd, gpointer ); // fwd
 
 static void _start_play()
 {
@@ -460,6 +466,16 @@ static void _start_play()
 	}
 
 	g_ed.played_samples = 0;
+	if( g_ed.has_pstart )
+	{
+		double total = g_ed.pxtn->moo_get_total_sample();
+		if( total > 0 )
+		{
+			double frac = (double)g_ed.pstart_clock * _sec_per_clock() * _SAMPLE_PER_SECOND / total;
+			frac = MIN( MAX( frac, 0.0 ), 0.999 );
+			g_ed.played_samples = (int64_t)( frac * total );
+		}
+	}
 	g_ed.playing = true;
 	if( g_ed.tb_play && !gtk_toggle_button_get_active( g_ed.tb_play ) )
 		gtk_toggle_button_set_active( g_ed.tb_play, TRUE );
@@ -470,10 +486,10 @@ static void _seek_to( int32_t clock )
 {
 	g_ed.has_pstart   = true;
 	g_ed.pstart_clock = clock;
-	if( !g_ed.loaded || !g_ed.playing ) return; // takes effect on next play
+	if( !g_ed.loaded ){ g_ed.has_pstart = false; return; }
 
 	double total = g_ed.pxtn->moo_get_total_sample();
-	if( total <= 0 ) return;
+	if( total <= 0 ){ gtk_widget_queue_draw( g_ed.draw_area ); return; }
 	double frac = (double)clock * _sec_per_clock() * _SAMPLE_PER_SECOND / total;
 	frac = MIN( MAX( frac, 0.0 ), 0.999 );
 
@@ -482,10 +498,9 @@ static void _seek_to( int32_t clock )
 	prep.start_pos_float = (float)frac;
 	prep.master_volume   = 0.80f;
 	if( g_ed.pxtn->moo_preparation( &prep ) )
-	{
 		g_ed.played_samples = (int64_t)( frac * total );
-		_set_status( "playback moved to clock %d", clock );
-	}
+	else
+		g_ed.playing = false;
 	gtk_widget_queue_draw( g_ed.draw_area );
 }
 
@@ -863,6 +878,8 @@ static void _drag_update( int x, int y )
 		SDL_UnlockAudio();
 		g_ed.drag_cur_clk = c;
 		g_ed.drag_cur_row = row;
+		g_ed.sel_clock    = c;
+		g_ed.sel_row      = row;
 	}
 	else if( g_ed.mode == DRAG_STRETCH && g_ed.dragging )
 	{
@@ -1312,6 +1329,17 @@ static void _draw_cb( GtkDrawingArea*, cairo_t* cr, int w, int h, gpointer )
 		}
 	}
 
+	// paste position marker (dashed white)
+	if( g_ed.has_paste_pos )
+	{
+		double x = g_ed.paste_clock * g_ed.px_per_clock - g_ed.h_offset;
+		cairo_set_source_rgba( cr, 1, 1, 1, 0.5 );
+		static const double dash[2] = { 6, 6 };
+		cairo_set_dash( cr, dash, 2, 0 );
+		cairo_move_to( cr, x, 0 ); cairo_line_to( cr, x, content_h ); cairo_stroke( cr );
+		cairo_set_dash( cr, NULL, 0, 0 );
+	}
+
 	// play-start marker
 	if( g_ed.has_pstart )
 	{
@@ -1429,6 +1457,8 @@ static void _on_drag_begin( GtkGestureDrag* gesture, double x, double y, gpointe
 	}
 
 	_clear_selection();
+	g_ed.paste_clock   = _snap_clock( clock );
+	g_ed.has_paste_pos = true;
 
 	const EVERECORD* hit = _find_note( clock, row, unit );
 	if( hit )
@@ -1463,14 +1493,13 @@ static void _on_drag_end( GtkGestureDrag*, double, double, gpointer )
 {
 	if( g_ed.mode == DRAG_RANGE )
 	{
-		int32_t c0 = MIN( g_ed.rg_c0, g_ed.rg_c1 ) / g_ed.snap * g_ed.snap;
-		int32_t c1 = ( MAX( g_ed.rg_c0, g_ed.rg_c1 ) + g_ed.snap ) / g_ed.snap * g_ed.snap;
-		g_ed.rg_c0 = c0; g_ed.rg_c1 = c1;
+		g_ed.rg_c0 = MIN( g_ed.rg_c0, g_ed.rg_c1 );
+		g_ed.rg_c1 = MAX( g_ed.rg_c0, g_ed.rg_c1 );
 		g_ed.has_range = true;
 		int n = 0;
 		for( const EVERECORD* p = g_ed.pxtn->evels->get_Records(); p; p = p->next )
 			if( p->kind == EVENTKIND_ON && p->unit_no == g_ed.sel_unit
-				&& p->clock >= c0 && p->clock < c1 ) n++;
+				&& p->clock >= g_ed.rg_c0 && p->clock < g_ed.rg_c1 ) n++;
 		_set_status( "range: %d notes - Del: delete, Ctrl+C: copy, Esc: clear", n );
 	}
 	g_ed.dragging = false;
@@ -1602,7 +1631,8 @@ static gboolean _on_key( GtkEventControllerKey*, guint keyval, guint, GdkModifie
 		SDL_LockAudio();
 		_push_undo();
 		_ensure_evels_capacity();
-		int32_t base = _snap_clock( (int32_t)( g_ed.h_offset / g_ed.px_per_clock ) + g_ed.snap );
+		int32_t base = g_ed.has_paste_pos ? g_ed.paste_clock
+			: _snap_clock( (int32_t)( g_ed.h_offset / g_ed.px_per_clock ) + g_ed.snap );
 		for( const ClipNote& cn : g_clipboard )
 		{
 			int32_t c = base + cn.rel_clock;
@@ -1625,6 +1655,7 @@ static gboolean _on_key( GtkEventControllerKey*, guint keyval, guint, GdkModifie
 	{
 		static const int snaps[] = { _BEAT_CLOCK, _BEAT_CLOCK/2, _BEAT_CLOCK/4, _BEAT_CLOCK/8 };
 		g_ed.snap = snaps[ keyval - '1' ];
+		if( g_ed.snap_combo ) gtk_drop_down_set_selected( GTK_DROP_DOWN( g_ed.snap_combo ), keyval - '1' );
 		_set_status( "snap: %d clocks", g_ed.snap );
 		return TRUE;
 	}
@@ -2065,6 +2096,13 @@ static void _build_song_page( GtkWidget* parent )
 	gtk_grid_attach( GTK_GRID( grid ), btn, 0, r, 2, 1 );
 }
 
+static void _on_snap_combo_changed( GtkDropDown* dd, gpointer )
+{
+	static const int snaps[] = { _BEAT_CLOCK, _BEAT_CLOCK/2, _BEAT_CLOCK/4, _BEAT_CLOCK/8 };
+	int sel = gtk_drop_down_get_selected( dd );
+	if( sel >= 0 && sel < 4 ){ g_ed.snap = snaps[ sel ]; _set_status( "snap: %d clocks", g_ed.snap ); }
+}
+
 // ---- activate / main -----------------------------------------------------------
 
 static GtkApplication* g_app = NULL;
@@ -2102,6 +2140,15 @@ static void _activate( GtkApplication*, gpointer )
 	g_ed.unit_combo = gtk_drop_down_new( G_LIST_MODEL( unit_list ), NULL );
 	gtk_widget_set_size_request( g_ed.unit_combo, 150, -1 );
 	gtk_box_append( GTK_BOX( header ), g_ed.unit_combo );
+
+	gtk_box_append( GTK_BOX( header ), gtk_label_new( "snap:" ) );
+	GtkWidget* snap_combo = gtk_drop_down_new_from_strings(
+		(const char*[]){ "1/4", "1/8", "1/16", "1/32", NULL } );
+	gtk_drop_down_set_selected( GTK_DROP_DOWN( snap_combo ),
+		g_ed.snap == _BEAT_CLOCK ? 0 : g_ed.snap == _BEAT_CLOCK/2 ? 1 :
+		g_ed.snap == _BEAT_CLOCK/4 ? 2 : 3 );
+	g_signal_connect( snap_combo, "notify::selected", G_CALLBACK( _on_snap_combo_changed ), NULL );
+	gtk_box_append( GTK_BOX( header ), snap_combo );
 
 	GtkWidget* btn_new   = gtk_button_new_with_label( "new file" );
 	GtkWidget* btn_open  = gtk_button_new_with_label( "open..." );
