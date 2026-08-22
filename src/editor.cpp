@@ -697,6 +697,88 @@ static void _sound_dialog()
 	gtk_window_present( GTK_WINDOW( win ) );
 }
 
+// ---- event editing (VELOCITY / VOLUME / PAN_VOLUME / PAN_TIME) ----------
+
+struct EventKindInfo { uint8_t kind; const char* name; double min, max, def; };
+static const EventKindInfo _event_kinds[] =
+{
+	{ EVENTKIND_VELOCITY,   "velocity",   0, 129, EVENTDEFAULT_VELOCITY   },
+	{ EVENTKIND_VOLUME,     "volume",     0, 129, EVENTDEFAULT_VOLUME     },
+	{ EVENTKIND_PAN_VOLUME, "pan volume", 0, 128, EVENTDEFAULT_PAN_VOLUME },
+	{ EVENTKIND_PAN_TIME,   "pan time",   0, 128, EVENTDEFAULT_PAN_TIME   },
+};
+static const int _event_kind_num = sizeof( _event_kinds ) / sizeof( _event_kinds[0] );
+
+// Write (replace) an event of the given kind at the snapped clock for a unit.
+static void _set_event( uint8_t kind, int32_t clock, int unit, int32_t value )
+{
+	if( !g_ed.loaded || unit < 0 || unit >= g_ed.unit_num ) return;
+	int32_t c = _snap_clock( clock );
+
+	SDL_LockAudio();
+	_push_undo();
+	_ensure_evels_capacity();
+	g_ed.pxtn->evels->Record_Delete( c, c + 1, (uint8_t)unit, kind );
+	g_ed.pxtn->evels->Record_Add_i( c, (uint8_t)unit, kind, value );
+	SDL_UnlockAudio();
+
+	for( int i = 0; i < _event_kind_num; i++ )
+		if( _event_kinds[ i ].kind == kind ){ _set_status( "%s = %d @ clock %d (unit %d)", _event_kinds[ i ].name, value, c, unit ); break; }
+	gtk_widget_queue_draw( g_ed.draw_area );
+}
+
+static void _on_event_set_clicked( GtkButton*, gpointer user_data )
+{
+	struct D { GtkWidget *type, *value; }* d = (D*)user_data;
+	int t = (int)gtk_drop_down_get_selected( GTK_DROP_DOWN( d->type ) );
+	if( t < 0 || t >= _event_kind_num ) return;
+	int unit = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
+	// selected note takes priority; otherwise the snapped view start
+	int32_t clock = g_ed.has_sel ? g_ed.sel_clock : (int32_t)( g_ed.h_offset / g_ed.px_per_clock );
+	_set_event( _event_kinds[ t ].kind, clock, unit,
+		(int32_t)gtk_range_get_value( GTK_RANGE( d->value ) ) );
+}
+
+static void _event_dialog()
+{
+	typedef struct { GtkWidget *type, *value, *dlgwin; } D;
+	D* d = new D{};
+
+	GtkWidget* win = gtk_window_new();
+	gtk_window_set_title( GTK_WINDOW( win ), "set event" );
+	gtk_window_set_default_size( GTK_WINDOW( win ), 360, 160 );
+	d->dlgwin = win;
+
+	GtkWidget* grid = gtk_grid_new();
+	gtk_grid_set_row_spacing( GTK_GRID( grid ), 6 );
+	gtk_grid_set_column_spacing( GTK_GRID( grid ), 8 );
+	gtk_widget_set_margin_start ( grid, 10 ); gtk_widget_set_margin_end  ( grid, 10 );
+	gtk_widget_set_margin_top   ( grid, 10 ); gtk_widget_set_margin_bottom( grid, 10 );
+	gtk_window_set_child( GTK_WINDOW( win ), grid );
+
+	const char* names[ _event_kind_num + 1 ];
+	for( int i = 0; i < _event_kind_num; i++ ) names[ i ] = _event_kinds[ i ].name;
+	names[ _event_kind_num ] = NULL;
+
+	gtk_grid_attach( GTK_GRID( grid ), gtk_label_new( "kind:" ), 0, 0, 1, 1 );
+	d->type = gtk_drop_down_new_from_strings( names );
+	gtk_grid_attach( GTK_GRID( grid ), d->type, 1, 0, 1, 1 );
+
+	d->value = gtk_scale_new_with_range( GTK_ORIENTATION_HORIZONTAL, 0, 129, 1 );
+	gtk_range_set_value( GTK_RANGE( d->value ), EVENTDEFAULT_VELOCITY );
+	gtk_widget_set_hexpand( d->value, TRUE );
+	gtk_grid_attach( GTK_GRID( grid ), gtk_label_new( "value:" ), 0, 1, 1, 1 );
+	gtk_grid_attach( GTK_GRID( grid ), d->value, 1, 1, 1, 1 );
+
+	gtk_grid_attach( GTK_GRID( grid ), gtk_label_new( "at: view start (snapped), selected unit" ), 0, 2, 2, 1 );
+
+	GtkWidget* btn = gtk_button_new_with_label( "set event" );
+	g_signal_connect( btn, "clicked", G_CALLBACK( _on_event_set_clicked ), d );
+	gtk_grid_attach( GTK_GRID( grid ), btn, 0, 3, 2, 1 );
+
+	gtk_window_present( GTK_WINDOW( win ) );
+}
+
 // ---- drawing ------------------------------------------------------------
 
 static void _draw_cb( GtkDrawingArea*, cairo_t* cr, int w, int h, gpointer )
@@ -762,6 +844,12 @@ static void _draw_cb( GtkDrawingArea*, cairo_t* cr, int w, int h, gpointer )
 
 		double r, g, b;
 		_unit_color( p->unit_no, &r, &g, &b );
+		// shade by velocity if one is set
+		{
+			int32_t vel = g_ed.pxtn->evels->get_Value( p->clock, p->unit_no, EVENTKIND_VELOCITY );
+			double f = 0.35 + 0.65 * ( vel / 129.0 );
+			r *= f; g *= f; b *= f;
+		}
 		cairo_set_source_rgb( cr, r, g, b );
 		cairo_rectangle( cr, x0, y + 1, x1 - x0, _ROW_H - 2 );
 		cairo_fill( cr );
@@ -1003,14 +1091,17 @@ static void _activate( GtkApplication* app, gpointer )
 
 	GtkWidget* btn_unit  = gtk_button_new_with_label( "+unit" );
 	GtkWidget* btn_sound = gtk_button_new_with_label( "sound..." );
+	GtkWidget* btn_event = gtk_button_new_with_label( "event..." );
 	GtkWidget* btn_play  = gtk_button_new_with_label( "▶ play" );
 	GtkWidget* btn_stop  = gtk_button_new_with_label( "■ stop" );
 	g_signal_connect_swapped( btn_unit,  "clicked", G_CALLBACK( +[]( gpointer ){ _add_unit(); } ), NULL );
 	g_signal_connect_swapped( btn_sound, "clicked", G_CALLBACK( +[]( gpointer ){ _sound_dialog(); } ), NULL );
+	g_signal_connect_swapped( btn_event, "clicked", G_CALLBACK( +[]( gpointer ){ _event_dialog(); } ), NULL );
 	g_signal_connect_swapped( btn_play,  "clicked", G_CALLBACK( +[]( gpointer ){ _start_play(); } ), NULL );
 	g_signal_connect_swapped( btn_stop,  "clicked", G_CALLBACK( +[]( gpointer ){ _stop_play(); } ), NULL );
 	gtk_box_append( GTK_BOX( hbox ), btn_unit );
 	gtk_box_append( GTK_BOX( hbox ), btn_sound );
+	gtk_box_append( GTK_BOX( hbox ), btn_event );
 	gtk_box_append( GTK_BOX( hbox ), btn_play );
 	gtk_box_append( GTK_BOX( hbox ), btn_stop );
 

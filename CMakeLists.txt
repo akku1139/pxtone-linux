@@ -59,6 +59,9 @@ target_link_libraries(woice_smoke PRIVATE pxtn pthread)
 add_executable(history_smoke tests/history_smoke.cpp)
 target_link_libraries(history_smoke PRIVATE pxtn pthread)
 
+add_executable(event_smoke tests/event_smoke.cpp)
+target_link_libraries(event_smoke PRIVATE pxtn pthread)
+
 # --- GUI: piano-roll style note visualizer -------------------------------
 add_executable(pxtone-visualizer src/visualizer.cpp)
 target_link_libraries(pxtone-visualizer PRIVATE pxtn SDL2::SDL2 m pthread)
