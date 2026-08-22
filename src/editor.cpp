@@ -2018,7 +2018,19 @@ static GtkGesture* g_drag_gest = NULL; // watched by _tick as a safety net
 
 static void _on_window_destroy( GtkWidget*, gpointer )
 {
+	// stop playback and release UI references BEFORE the widgets are finalized
+	_stop_play();
 	if( g_tick_id ){ g_source_remove( g_tick_id ); g_tick_id = 0; }
+	g_ed.draw_area     = NULL;
+	g_ed.tb_play       = nullptr;
+	g_ed.unit_combo    = NULL;
+	g_ed.status        = NULL;
+	g_ed.hadj          = NULL;
+	g_ed.vadj          = NULL;
+	g_ed.units_list    = NULL;
+	g_ed.units_stats   = NULL;
+	g_ed.rename_entry  = NULL;
+	g_ed.notebook      = NULL;
 }
 
 
