@@ -1571,8 +1571,8 @@ static void _activate( GtkApplication* app, gpointer )
 	g_signal_connect( g_ed.vadj, "value-changed", G_CALLBACK( _on_vscroll ), NULL );
 
 	GtkWidget* center = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 0 );
+	gtk_widget_set_hexpand( g_ed.draw_area, TRUE ); // must expand or its width collapses to 0
 	gtk_box_append( GTK_BOX( center ), g_ed.draw_area );
-	gtk_widget_set_vexpand( g_ed.draw_area, TRUE );
 	gtk_box_append( GTK_BOX( center ), gtk_scrollbar_new( GTK_ORIENTATION_VERTICAL, g_ed.vadj ) );
 	gtk_widget_set_vexpand( center, TRUE );
 	gtk_box_append( GTK_BOX( vbox ), center );
