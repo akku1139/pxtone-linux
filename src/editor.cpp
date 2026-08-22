@@ -1825,8 +1825,9 @@ static bool _init_new_project()
 	if( g_ed.pxtn->init() != pxtnOK ) return false;
 	if( !g_ed.pxtn->set_destination_quality( _CHANNEL_NUM, _SAMPLE_PER_SECOND ) ) return false;
 	g_ed.pxtn->master->Set( 4, 120.0f, _BEAT_CLOCK );
-	g_ed.pxtn->master->set_meas_num   ( 32 );
-	g_ed.pxtn->master->set_last_meas  ( 31 );
+	g_ed.pxtn->master->set_meas_num   ( 8 );
+	g_ed.pxtn->master->set_last_meas  ( 7 );
+	g_ed.pxtn->master->set_repeat_meas( 0 ); // loop the whole (short) song by default
 	g_ed.pxtn->evels->Allocate( 8192 );
 	g_ed.pxtn->Unit_AddNew();
 	int w = g_ed.pxtn->Woice_AddNew();
