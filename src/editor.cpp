@@ -99,27 +99,45 @@ static const double PI = 3.141592653589793;
 
 static void _preview_note( int unit, int row ); // fwd
 
-// ---- undo/redo (event snapshots) ----------------------------------------
+// ---- undo/redo (project snapshots) --------------------------------------
 
 static void _set_status( const char* fmt, ... ); // fwd
 
-static std::vector<std::vector<EVERECORD>> g_undo, g_redo;
+struct SongSnap
+{
+	std::vector<EVERECORD> eves;
+	int32_t beat_num, beat_clock, meas_num, repeat_meas, last_meas;
+	float   tempo;
+};
+static std::vector<SongSnap> g_undo, g_redo;
 
 struct ClipNote { int32_t rel_clock; int unit; int32_t key_row; int32_t dur; };
 static std::vector<ClipNote> g_clipboard;
 
-static std::vector<EVERECORD> _snapshot()
+static SongSnap _snapshot()
 {
-	std::vector<EVERECORD> recs;
-	for( const EVERECORD* p = g_ed.pxtn->evels->get_Records(); p; p = p->next ) recs.push_back( *p );
-	return recs;
+	SongSnap s{};
+	for( const EVERECORD* p = g_ed.pxtn->evels->get_Records(); p; p = p->next ) s.eves.push_back( *p );
+	pxtnMaster* m = g_ed.pxtn->master;
+	s.beat_num    = m->get_beat_num();
+	s.beat_clock  = m->get_beat_clock();
+	s.tempo       = m->get_beat_tempo();
+	s.meas_num    = m->get_meas_num();
+	s.repeat_meas = m->get_repeat_meas();
+	s.last_meas   = m->get_last_meas();
+	return s;
 }
 
-static void _restore_snapshot( const std::vector<EVERECORD>& recs )
+static void _restore_snapshot( const SongSnap& s )
 {
-	g_ed.pxtn->evels->Allocate( recs.size() + 4096 );
-	for( const EVERECORD& r : recs )
+	g_ed.pxtn->evels->Allocate( s.eves.size() + 4096 );
+	for( const EVERECORD& r : s.eves )
 		g_ed.pxtn->evels->Record_Add_i( r.clock, r.unit_no, r.kind, r.value );
+	g_ed.pxtn->master->Set( s.beat_num, s.tempo, s.beat_clock );
+	g_ed.pxtn->master->set_meas_num   ( s.meas_num );
+	g_ed.pxtn->master->set_repeat_meas( s.repeat_meas );
+	g_ed.pxtn->master->set_last_meas  ( s.last_meas );
+	if( s.tempo > 0 ) g_ed.tempo = s.tempo;
 }
 
 static void _push_undo()
@@ -779,6 +797,104 @@ static void _event_dialog()
 	gtk_window_present( GTK_WINDOW( win ) );
 }
 
+// ---- song settings (tempo / beats / measures / repeat / last) -----------
+
+static void _apply_song( double tempo, int beat_num, int32_t beat_clock,
+                         int meas_num, int repeat_meas, int last_meas )
+{
+	if( !g_ed.loaded ) return;
+	if( last_meas < 0 ) last_meas = meas_num - 1; // keep song length consistent (meas is derived from content on load)
+	SDL_LockAudio();
+	_push_undo();
+	g_ed.pxtn->master->Set( beat_num, (float)tempo, beat_clock );
+	g_ed.pxtn->master->set_meas_num   ( meas_num );
+	g_ed.pxtn->master->set_repeat_meas( repeat_meas );
+	g_ed.pxtn->master->set_last_meas  ( last_meas );
+	// song length is derived from the last measure on load; keep in-sync
+	g_ed.pxtn->master->set_meas_num   ( last_meas );
+	SDL_UnlockAudio();
+
+	g_ed.tempo = tempo;
+	_set_status( "song: tempo=%.1f beats=%d clock=%d meas=%d repeat=%d last=%d",
+		tempo, beat_num, beat_clock, meas_num, repeat_meas, last_meas );
+	gtk_widget_queue_draw( g_ed.draw_area );
+}
+
+static void _on_song_apply( GtkButton*, gpointer user_data )
+{
+	struct D { GtkWidget *tempo,*beat_num,*beat_clock,*meas,*repeat,*last,*dlgwin; }* d = (D*)user_data;
+	int rm = (int)gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->repeat ) );
+	int lm = (int)gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->last ) );
+	_apply_song(
+		gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->tempo ) ),
+		(int)gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->beat_num ) ),
+		(int)gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->beat_clock ) ),
+		(int)gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->meas ) ),
+		rm - 1, // -1 = none (spin is 0-based)
+		lm - 1 );
+	gtk_window_destroy( GTK_WINDOW( d->dlgwin ) );
+	delete d;
+}
+
+static void _song_dialog()
+{
+	typedef struct { GtkWidget *tempo,*beat_num,*beat_clock,*meas,*repeat,*last,*dlgwin; } D;
+	D* d = new D{};
+
+	pxtnMaster* m = g_ed.pxtn->master;
+
+	GtkWidget* win = gtk_window_new();
+	gtk_window_set_title( GTK_WINDOW( win ), "song settings" );
+	gtk_window_set_default_size( GTK_WINDOW( win ), 340, 300 );
+	d->dlgwin = win;
+
+	GtkWidget* grid = gtk_grid_new();
+	gtk_grid_set_row_spacing( GTK_GRID( grid ), 6 );
+	gtk_grid_set_column_spacing( GTK_GRID( grid ), 8 );
+	gtk_widget_set_margin_start ( grid, 10 ); gtk_widget_set_margin_end  ( grid, 10 );
+	gtk_widget_set_margin_top   ( grid, 10 ); gtk_widget_set_margin_bottom( grid, 10 );
+	gtk_window_set_child( GTK_WINDOW( win ), grid );
+	int r = 0;
+
+	auto row_label = [&]( const char* txt ){ gtk_grid_attach( GTK_GRID( grid ), gtk_label_new( txt ), 0, r, 1, 1 ); };
+
+	row_label( "tempo" );
+	d->tempo = gtk_spin_button_new_with_range( 30, 300, 0.5 );
+	gtk_spin_button_set_value( GTK_SPIN_BUTTON( d->tempo ), m->get_beat_tempo() );
+	gtk_grid_attach( GTK_GRID( grid ), d->tempo, 1, r++, 1, 1 );
+
+	row_label( "beats / measure" );
+	d->beat_num = gtk_spin_button_new_with_range( 1, 16, 1 );
+	gtk_spin_button_set_value( GTK_SPIN_BUTTON( d->beat_num ), m->get_beat_num() );
+	gtk_grid_attach( GTK_GRID( grid ), d->beat_num, 1, r++, 1, 1 );
+
+	row_label( "clock / beat" );
+	d->beat_clock = gtk_spin_button_new_with_range( 96, 1920, 48 );
+	gtk_spin_button_set_value( GTK_SPIN_BUTTON( d->beat_clock ), m->get_beat_clock() );
+	gtk_grid_attach( GTK_GRID( grid ), d->beat_clock, 1, r++, 1, 1 );
+
+	row_label( "measures" );
+	d->meas = gtk_spin_button_new_with_range( 1, 999, 1 );
+	gtk_spin_button_set_value( GTK_SPIN_BUTTON( d->meas ), m->get_meas_num() );
+	gtk_grid_attach( GTK_GRID( grid ), d->meas, 1, r++, 1, 1 );
+
+	row_label( "repeat measure (0=none)" );
+	d->repeat = gtk_spin_button_new_with_range( 0, 998, 1 );
+	gtk_spin_button_set_value( GTK_SPIN_BUTTON( d->repeat ), m->get_repeat_meas() + 1 );
+	gtk_grid_attach( GTK_GRID( grid ), d->repeat, 1, r++, 1, 1 );
+
+	row_label( "last measure (0=none)" );
+	d->last = gtk_spin_button_new_with_range( 0, 999, 1 );
+	gtk_spin_button_set_value( GTK_SPIN_BUTTON( d->last ), m->get_last_meas() + 1 );
+	gtk_grid_attach( GTK_GRID( grid ), d->last, 1, r++, 1, 1 );
+
+	GtkWidget* btn = gtk_button_new_with_label( "apply" );
+	g_signal_connect( btn, "clicked", G_CALLBACK( _on_song_apply ), d );
+	gtk_grid_attach( GTK_GRID( grid ), btn, 0, r, 2, 1 );
+
+	gtk_window_present( GTK_WINDOW( win ) );
+}
+
 // ---- drawing ------------------------------------------------------------
 
 static void _draw_cb( GtkDrawingArea*, cairo_t* cr, int w, int h, gpointer )
@@ -811,20 +927,28 @@ static void _draw_cb( GtkDrawingArea*, cairo_t* cr, int w, int h, gpointer )
 		}
 	}
 
-	// beat / snap grid
+	// beat / snap / measure grid
 	{
 		int32_t first_clock = (int32_t)( g_ed.h_offset / g_ed.px_per_clock );
 		int32_t last_clock  = (int32_t)( ( g_ed.h_offset + w ) / g_ed.px_per_clock ) + g_ed.snap;
+		int32_t beat_clock  = g_ed.pxtn->master->get_beat_clock();
+		int32_t meas_clock  = beat_clock * g_ed.pxtn->master->get_beat_num();
 
 		for( int32_t c = _snap_clock( first_clock ); c <= last_clock; c += g_ed.snap )
 		{
-			bool is_beat = ( c % _BEAT_CLOCK == 0 );
+			bool is_meas = ( meas_clock > 0 && c % meas_clock == 0 );
+			bool is_beat = ( c % beat_clock == 0 );
 			double x = c * g_ed.px_per_clock - g_ed.h_offset;
-			cairo_set_source_rgb( cr, is_beat ? 0.30 : 0.16, is_beat ? 0.30 : 0.16, is_beat ? 0.42 : 0.22 );
+			cairo_set_source_rgb( cr,
+				is_meas ? 0.55 : is_beat ? 0.30 : 0.16,
+				is_meas ? 0.45 : is_beat ? 0.30 : 0.16,
+				is_meas ? 0.75 : is_beat ? 0.42 : 0.22 );
+			cairo_set_line_width( cr, is_meas ? 2.0 : 1.0 );
 			cairo_move_to( cr, x, 0 );
 			cairo_line_to( cr, x, content_h );
 			cairo_stroke( cr );
 		}
+		cairo_set_line_width( cr, 1.0 );
 	}
 
 	// notes
@@ -1092,15 +1216,18 @@ static void _activate( GtkApplication* app, gpointer )
 	GtkWidget* btn_unit  = gtk_button_new_with_label( "+unit" );
 	GtkWidget* btn_sound = gtk_button_new_with_label( "sound..." );
 	GtkWidget* btn_event = gtk_button_new_with_label( "event..." );
+	GtkWidget* btn_song  = gtk_button_new_with_label( "song..." );
 	GtkWidget* btn_play  = gtk_button_new_with_label( "▶ play" );
 	GtkWidget* btn_stop  = gtk_button_new_with_label( "■ stop" );
 	g_signal_connect_swapped( btn_unit,  "clicked", G_CALLBACK( +[]( gpointer ){ _add_unit(); } ), NULL );
 	g_signal_connect_swapped( btn_sound, "clicked", G_CALLBACK( +[]( gpointer ){ _sound_dialog(); } ), NULL );
 	g_signal_connect_swapped( btn_event, "clicked", G_CALLBACK( +[]( gpointer ){ _event_dialog(); } ), NULL );
+	g_signal_connect_swapped( btn_song,  "clicked", G_CALLBACK( +[]( gpointer ){ _song_dialog(); } ), NULL );
 	g_signal_connect_swapped( btn_play,  "clicked", G_CALLBACK( +[]( gpointer ){ _start_play(); } ), NULL );
 	g_signal_connect_swapped( btn_stop,  "clicked", G_CALLBACK( +[]( gpointer ){ _stop_play(); } ), NULL );
 	gtk_box_append( GTK_BOX( hbox ), btn_unit );
 	gtk_box_append( GTK_BOX( hbox ), btn_sound );
+	gtk_box_append( GTK_BOX( hbox ), btn_song );
 	gtk_box_append( GTK_BOX( hbox ), btn_event );
 	gtk_box_append( GTK_BOX( hbox ), btn_play );
 	gtk_box_append( GTK_BOX( hbox ), btn_stop );
