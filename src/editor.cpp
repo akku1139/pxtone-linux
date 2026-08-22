@@ -91,6 +91,13 @@ struct Editor
 	GtkWidget* window    = NULL;
 	GtkWidget* draw_area = NULL;
 	GtkAdjustment *hadj = NULL, *vadj = NULL;
+
+	// dialog windows (single instance, driven by toggle buttons)
+	GtkWidget* win_sound = NULL;  GtkToggleButton* tb_sound  = NULL;
+	GtkWidget* win_event = NULL;  GtkToggleButton* tb_event  = NULL;
+	GtkWidget* win_song  = NULL;  GtkToggleButton* tb_song   = NULL;
+	GtkWidget* win_rename= NULL;  GtkToggleButton* tb_rename = NULL;
+	bool file_dlg_busy = false;
 	GtkWidget* unit_combo = NULL;
 	GtkWidget* snap_combo = NULL;
 	GtkWidget* status     = NULL;
@@ -100,7 +107,30 @@ static Editor g_ed;
 
 static const double PI = 3.141592653589793;
 
+static void _win_destroyed( GtkWidget*, gpointer data )
+{
+	gpointer* arr = (gpointer*)data;
+	*(GtkWidget**)arr[0] = NULL;
+	GtkToggleButton* btn = GTK_TOGGLE_BUTTON( arr[1] );
+	if( gtk_toggle_button_get_active( btn ) ) gtk_toggle_button_set_active( btn, FALSE );
+}
+
+static void _on_toggle_dialog( GtkToggleButton* btn, gpointer data )
+{
+	gpointer* arr = (gpointer*)data;
+	GtkWidget** slot = (GtkWidget**)arr[0];
+	void (*create)() = (void (*)())arr[2];
+	if( gtk_toggle_button_get_active( btn ) ){ if( !*slot ) create(); }
+	else if( *slot ) gtk_window_destroy( GTK_WINDOW( *slot ) );
+}
+
 static void _preview_note( int unit, int row, int32_t clock ); // fwd
+
+// ---- dialog window <-> toggle button binding ----------------------------
+
+static void _win_destroyed( GtkWidget*, gpointer );
+static void _on_toggle_dialog( GtkToggleButton*, gpointer );
+static gpointer g_bind_sound[3], g_bind_event[3], g_bind_song[3], g_bind_rename[3];
 
 // ---- undo/redo (project snapshots) --------------------------------------
 
@@ -156,14 +186,11 @@ static void _push_undo()
 // during playback).
 static void _restore_safely( const SongSnap& s )
 {
-	// stop the mixer before freeing/rebuilding events, then ALWAYS resume:
-	// the callback outputs silence when not playing, and a paused mixer
-	// would silently kill note previews until the next Play.
-	SDL_PauseAudio( 1 );
+	// LockAudio serializes against the audio callback (which keeps running:
+	// pausing it would silently kill note previews until the next Play).
 	SDL_LockAudio();
 	_restore_snapshot( s );
 	SDL_UnlockAudio();
-	SDL_PauseAudio( 0 );
 }
 
 static void _undo()
@@ -316,8 +343,7 @@ static void _start_play()
 static void _stop_play()
 {
 	if( !g_ed.playing ) return;
-	g_ed.playing = false;
-	SDL_PauseAudio( 1 );
+	g_ed.playing = false;  // keep the mixer running for previews
 	_set_status( "stopped" );
 	gtk_widget_queue_draw( g_ed.draw_area );
 }
@@ -486,11 +512,9 @@ static bool _init_new_project(); // fwd (defined near _load_tune)
 
 static void _new_tune()
 {
-	SDL_PauseAudio( 1 );
-	SDL_LockAudio();
+	SDL_LockAudio();     // serialize against the audio callback
 	bool ok = _init_new_project();
 	SDL_UnlockAudio();
-	SDL_PauseAudio( 0 ); // keep the mixer running for previews
 	if( !ok ) return;
 
 	_refresh_unit_combo();
@@ -502,7 +526,6 @@ static void _new_tune()
 
 static void _open_path( const char* path )
 {
-	SDL_PauseAudio( 1 );
 	SDL_LockAudio();
 
 	pxtnService* p = new pxtnService( _pxtn_r, _pxtn_w, _pxtn_s, _pxtn_p );
@@ -518,7 +541,6 @@ static void _open_path( const char* path )
 	{
 		delete p;
 		SDL_UnlockAudio();
-		SDL_PauseAudio( 0 );
 		_set_status( "open failed: %s (%s)", path, pxtnError_get_string( err ) );
 		return;
 	}
@@ -536,7 +558,6 @@ static void _open_path( const char* path )
 	g_ed.h_offset = 0; g_ed.v_offset = 0;
 
 	SDL_UnlockAudio();
-	SDL_PauseAudio( 0 );
 
 	_refresh_unit_combo();
 	_set_status( "opened: %s", path );
@@ -546,6 +567,7 @@ static void _open_path( const char* path )
 static void _on_open_response( GObject* src, GAsyncResult* res, gpointer )
 {
 	GError* err = NULL;
+	g_ed.file_dlg_busy = false;
 	GFile* f = gtk_file_dialog_open_finish( GTK_FILE_DIALOG( src ), res, &err );
 	if( f )
 	{
@@ -559,6 +581,8 @@ static void _on_open_response( GObject* src, GAsyncResult* res, gpointer )
 
 static void _open_dialog()
 {
+	if( g_ed.file_dlg_busy ) return; // prevent stacking dialogs
+	g_ed.file_dlg_busy = true;
 	GtkFileDialog* dlg = gtk_file_dialog_new();
 	gtk_file_dialog_set_title( dlg, "open ptcop" );
 	GtkFileFilter* f = gtk_file_filter_new();
@@ -576,6 +600,7 @@ static void _open_dialog()
 static void _on_save_response( GObject* src, GAsyncResult* res, gpointer )
 {
 	GError* err = NULL;
+	g_ed.file_dlg_busy = false;
 	GFile* f = gtk_file_dialog_save_finish( GTK_FILE_DIALOG( src ), res, &err );
 	if( f )
 	{
@@ -589,6 +614,8 @@ static void _on_save_response( GObject* src, GAsyncResult* res, gpointer )
 
 static void _save_as_dialog()
 {
+	if( g_ed.file_dlg_busy ) return;
+	g_ed.file_dlg_busy = true;
 	GtkFileDialog* dlg = gtk_file_dialog_new();
 	gtk_file_dialog_set_title( dlg, "save as" );
 	gtk_file_dialog_set_initial_name( dlg, g_ed.path.empty() ? "untitled.ptcop" : g_ed.path.c_str() );
@@ -963,6 +990,8 @@ static void _sound_dialog()
 	g_signal_connect( btn, "clicked", G_CALLBACK( _on_create_clicked ), d );
 	gtk_grid_attach( GTK_GRID( grid ), btn, 1, r, 2, 1 );
 
+	g_ed.win_sound = win;
+	g_signal_connect( win, "destroy", G_CALLBACK( _win_destroyed ), g_bind_sound );
 	gtk_window_present( GTK_WINDOW( win ) );
 }
 
@@ -1073,6 +1102,8 @@ static void _event_dialog()
 	g_signal_connect( btn, "clicked", G_CALLBACK( _on_event_set_clicked ), d );
 	gtk_grid_attach( GTK_GRID( grid ), btn, 0, 3, 2, 1 );
 
+	g_ed.win_event = win;
+	g_signal_connect( win, "destroy", G_CALLBACK( _win_destroyed ), g_bind_event );
 	gtk_window_present( GTK_WINDOW( win ) );
 }
 
@@ -1126,6 +1157,8 @@ static void _rename_dialog()
 	g_signal_connect( btn, "clicked", G_CALLBACK( _on_rename_ok ), d );
 	gtk_box_append( GTK_BOX( box ), btn );
 
+	g_ed.win_rename = win;
+	g_signal_connect( win, "destroy", G_CALLBACK( _win_destroyed ), g_bind_rename );
 	gtk_window_present( GTK_WINDOW( win ) );
 }
 
@@ -1224,6 +1257,8 @@ static void _song_dialog()
 	g_signal_connect( btn, "clicked", G_CALLBACK( _on_song_apply ), d );
 	gtk_grid_attach( GTK_GRID( grid ), btn, 0, r, 2, 1 );
 
+	g_ed.win_song = win;
+	g_signal_connect( win, "destroy", G_CALLBACK( _win_destroyed ), g_bind_song );
 	gtk_window_present( GTK_WINDOW( win ) );
 }
 
@@ -1617,12 +1652,12 @@ static void _activate( GtkApplication* app, gpointer )
 	gtk_box_append( GTK_BOX( hbox ), g_ed.unit_combo );
 
 	GtkWidget* btn_unit  = gtk_button_new_with_label( "+unit" );
-	GtkWidget* btn_sound = gtk_button_new_with_label( "sound..." );
-	GtkWidget* btn_event = gtk_button_new_with_label( "event..." );
-	GtkWidget* btn_rename= gtk_button_new_with_label( "rename" );
-	GtkWidget* btn_mute  = gtk_button_new_with_label( "mute" );
-	GtkWidget* btn_solo  = gtk_button_new_with_label( "solo" );
-	GtkWidget* btn_song  = gtk_button_new_with_label( "song..." );
+	GtkWidget* btn_sound = gtk_toggle_button_new_with_label( "sound..." );
+	GtkWidget* btn_event = gtk_toggle_button_new_with_label( "event..." );
+	GtkWidget* btn_rename= gtk_toggle_button_new_with_label( "rename" );
+	GtkWidget* btn_mute  = gtk_toggle_button_new_with_label( "mute" );
+	GtkWidget* btn_solo  = gtk_toggle_button_new_with_label( "solo" );
+	GtkWidget* btn_song  = gtk_toggle_button_new_with_label( "song..." );
 	GtkWidget* btn_new   = gtk_button_new_with_label( "new" );
 	GtkWidget* btn_open  = gtk_button_new_with_label( "open..." );
 	GtkWidget* btn_saveas= gtk_button_new_with_label( "save as..." );
@@ -1631,12 +1666,36 @@ static void _activate( GtkApplication* app, gpointer )
 	GtkWidget* btn_play  = gtk_button_new_with_label( "▶ play" );
 	GtkWidget* btn_stop  = gtk_button_new_with_label( "■ stop" );
 	g_signal_connect_swapped( btn_unit,  "clicked", G_CALLBACK( +[]( gpointer ){ _add_unit(); } ), NULL );
-	g_signal_connect_swapped( btn_sound, "clicked", G_CALLBACK( +[]( gpointer ){ _sound_dialog(); } ), NULL );
-	g_signal_connect_swapped( btn_event, "clicked", G_CALLBACK( +[]( gpointer ){ _event_dialog(); } ), NULL );
-	g_signal_connect_swapped( btn_rename,"clicked", G_CALLBACK( +[]( gpointer ){ _rename_dialog(); } ), NULL );
-	g_signal_connect_swapped( btn_mute,  "clicked", G_CALLBACK( +[]( gpointer ){ _mute_selected(); } ), NULL );
-	g_signal_connect_swapped( btn_solo,  "clicked", G_CALLBACK( +[]( gpointer ){ _solo_selected(); } ), NULL );
-	g_signal_connect_swapped( btn_song,  "clicked", G_CALLBACK( +[]( gpointer ){ _song_dialog(); } ), NULL );
+	// dialog toggles: one window per button, closed by pressing again
+	g_ed.tb_sound  = GTK_TOGGLE_BUTTON( btn_sound );
+	g_ed.tb_event  = GTK_TOGGLE_BUTTON( btn_event );
+	g_ed.tb_rename = GTK_TOGGLE_BUTTON( btn_rename );
+	g_ed.tb_song   = GTK_TOGGLE_BUTTON( btn_song );
+	g_bind_sound [0] = &g_ed.win_sound;  g_bind_sound [1] = btn_sound; g_bind_sound [2] = (gpointer)_sound_dialog;
+	g_bind_event [0] = &g_ed.win_event;  g_bind_event [1] = btn_event; g_bind_event [2] = (gpointer)_event_dialog;
+	g_bind_rename[0] = &g_ed.win_rename; g_bind_rename[1] = btn_rename; g_bind_rename[2] = (gpointer)_rename_dialog;
+	g_bind_song  [0] = &g_ed.win_song;   g_bind_song  [1] = btn_song;  g_bind_song  [2] = (gpointer)_song_dialog;
+	g_signal_connect( btn_sound, "toggled", G_CALLBACK( _on_toggle_dialog ), g_bind_sound );
+	g_signal_connect( btn_event, "toggled", G_CALLBACK( _on_toggle_dialog ), g_bind_event );
+	g_signal_connect( btn_rename,"toggled", G_CALLBACK( _on_toggle_dialog ), g_bind_rename );
+	g_signal_connect( btn_song,  "toggled", G_CALLBACK( _on_toggle_dialog ), g_bind_song );
+
+	// mute / solo toggles for the selected unit
+	g_signal_connect( btn_mute, "toggled", G_CALLBACK( +[]( GtkToggleButton* b, gpointer ){
+		int u = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
+		if( u < 0 || u >= g_ed.unit_num ) return;
+		bool muted = gtk_toggle_button_get_active( b );
+		g_ed.pxtn->Unit_Get_variable( u )->set_played( !muted );
+		_set_status( "unit %d %s", u, muted ? "MUTED" : "unmuted" );
+	} ), NULL );
+	g_signal_connect( btn_solo, "toggled", G_CALLBACK( +[]( GtkToggleButton* b, gpointer ){
+		int u = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
+		if( u < 0 || u >= g_ed.unit_num ) return;
+		bool solo = gtk_toggle_button_get_active( b );
+		for( int i = 0; i < g_ed.unit_num; i++ )
+			g_ed.pxtn->Unit_Get_variable( i )->set_played( !solo || i == u );
+		_set_status( solo ? "solo: unit %d" : "solo off", u );
+	} ), NULL );
 	g_signal_connect_swapped( btn_play,  "clicked", G_CALLBACK( +[]( gpointer ){ _start_play(); } ), NULL );
 	g_signal_connect_swapped( btn_stop,  "clicked", G_CALLBACK( +[]( gpointer ){ _stop_play(); } ), NULL );
 	g_signal_connect_swapped( btn_new,   "clicked", G_CALLBACK( +[]( gpointer ){ _new_tune(); } ), NULL );
@@ -1750,6 +1809,10 @@ static bool _init_new_project()
 	g_ed.pxtn->Unit_Get_variable( 0 )->set_woice( wv );
 	g_ed.pxtn->Unit_Get_variable( 0 )->set_name_buf( "unit 0", 6 );
 
+	// allow Play without loading a file first
+	g_ed.pxtn->tones_ready();
+	g_ed.pxtn->moo_set_valid_data( true );
+
 	// reset editor state
 	g_undo.clear(); g_redo.clear(); g_clipboard.clear();
 	g_ed.has_sel = false; g_ed.dragging = false; g_ed.mode = DRAG_NONE;
@@ -1828,8 +1891,8 @@ int main( int argc, char** argv )
 		return 1;
 	}
 
-	// run the mixer from startup so note previews work before the first Play
-	SDL_PauseAudio( 0 );
+	// mixer starts here and runs forever; playback is gated by g_ed.playing
+	SDL_PauseAudio( 0 ); // legacy devices open paused
 	g_ed.pv_buf.assign( _SAMPLE_PER_SECOND * _CHANNEL_NUM, 0 ); // 1s preview FIFO
 
 	GtkApplication* app = gtk_application_new( "com.github.pxtone.editor", G_APPLICATION_NON_UNIQUE );

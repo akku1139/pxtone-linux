@@ -223,6 +223,7 @@ public :
 	//////////////
 
 	bool    moo_is_valid_data() const;
+	void    moo_set_valid_data( bool b ){ if( _moo_b_init ) _moo_b_valid_data = b; } // for projects created from scratch
 	bool    moo_is_end_vomit () const;
 		    
 	bool    moo_set_mute_by_unit( bool b );
