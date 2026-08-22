@@ -717,18 +717,22 @@ static void _sound_dialog()
 
 // ---- event editing (VELOCITY / VOLUME / PAN_VOLUME / PAN_TIME) ----------
 
-struct EventKindInfo { uint8_t kind; const char* name; double min, max, def; };
+struct EventKindInfo { uint8_t kind; const char* name; double min, max, def; bool is_float; };
 static const EventKindInfo _event_kinds[] =
 {
-	{ EVENTKIND_VELOCITY,   "velocity",   0, 129, EVENTDEFAULT_VELOCITY   },
-	{ EVENTKIND_VOLUME,     "volume",     0, 129, EVENTDEFAULT_VOLUME     },
-	{ EVENTKIND_PAN_VOLUME, "pan volume", 0, 128, EVENTDEFAULT_PAN_VOLUME },
-	{ EVENTKIND_PAN_TIME,   "pan time",   0, 128, EVENTDEFAULT_PAN_TIME   },
+	{ EVENTKIND_VELOCITY,   "velocity",   0, 129, EVENTDEFAULT_VELOCITY,   false },
+	{ EVENTKIND_VOLUME,     "volume",     0, 129, EVENTDEFAULT_VOLUME,     false },
+	{ EVENTKIND_PAN_VOLUME, "pan volume", 0, 128, EVENTDEFAULT_PAN_VOLUME, false },
+	{ EVENTKIND_PAN_TIME,   "pan time",   0, 128, EVENTDEFAULT_PAN_TIME,   false },
+	{ EVENTKIND_PORTAMENT,  "portament",  0, 127, EVENTDEFAULT_PORTAMENT,  false },
+	{ EVENTKIND_VOICENO,    "voice no",   0,  63, EVENTDEFAULT_VOICENO,    false },
+	{ EVENTKIND_GROUPNO,    "group no",   0,  15, EVENTDEFAULT_GROUPNO,    false },
+	{ EVENTKIND_TUNING,     "tuning",     0.1, 4.0, EVENTDEFAULT_TUNING,   true  },
 };
 static const int _event_kind_num = sizeof( _event_kinds ) / sizeof( _event_kinds[0] );
 
 // Write (replace) an event of the given kind at the snapped clock for a unit.
-static void _set_event( uint8_t kind, int32_t clock, int unit, int32_t value )
+static void _set_event_f( uint8_t kind, int32_t clock, int unit, double value )
 {
 	if( !g_ed.loaded || unit < 0 || unit >= g_ed.unit_num ) return;
 	int32_t c = _snap_clock( clock );
@@ -737,12 +741,35 @@ static void _set_event( uint8_t kind, int32_t clock, int unit, int32_t value )
 	_push_undo();
 	_ensure_evels_capacity();
 	g_ed.pxtn->evels->Record_Delete( c, c + 1, (uint8_t)unit, kind );
-	g_ed.pxtn->evels->Record_Add_i( c, (uint8_t)unit, kind, value );
+	if( kind == EVENTKIND_TUNING ) g_ed.pxtn->evels->Record_Add_f( c, (uint8_t)unit, kind, (float)value );
+	else                           g_ed.pxtn->evels->Record_Add_i( c, (uint8_t)unit, kind, (int32_t)value );
 	SDL_UnlockAudio();
 
 	for( int i = 0; i < _event_kind_num; i++ )
-		if( _event_kinds[ i ].kind == kind ){ _set_status( "%s = %d @ clock %d (unit %d)", _event_kinds[ i ].name, value, c, unit ); break; }
+	{
+		if( _event_kinds[ i ].kind != kind ) continue;
+		if( _event_kinds[ i ].is_float ) _set_status( "%s = %.3f @ clock %d (unit %d)", _event_kinds[ i ].name, value, c, unit );
+		else                             _set_status( "%s = %d @ clock %d (unit %d)", _event_kinds[ i ].name, (int)value, c, unit );
+		break;
+	}
 	gtk_widget_queue_draw( g_ed.draw_area );
+}
+
+static void _set_event( uint8_t kind, int32_t clock, int unit, int32_t value )
+{
+	_set_event_f( kind, clock, unit, (double)value );
+}
+
+static void _on_event_type_changed( GtkDropDown* dd, gpointer user_data )
+{
+	GtkWidget* value = GTK_WIDGET( user_data );
+	int t = (int)gtk_drop_down_get_selected( dd );
+	if( t < 0 || t >= _event_kind_num ) return;
+	const EventKindInfo& ki = _event_kinds[ t ];
+	double v = gtk_range_get_value( GTK_RANGE( value ) );
+	if( ki.is_float ) gtk_range_set_range( GTK_RANGE( value ), ki.min, ki.max );
+	else              gtk_range_set_range( GTK_RANGE( value ), ki.min, ki.max );
+	gtk_range_set_value( GTK_RANGE( value ), ki.def > 0 ? ki.def : ( v > ki.max ? ki.def : v ) );
 }
 
 static void _on_event_set_clicked( GtkButton*, gpointer user_data )
@@ -753,8 +780,8 @@ static void _on_event_set_clicked( GtkButton*, gpointer user_data )
 	int unit = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
 	// selected note takes priority; otherwise the snapped view start
 	int32_t clock = g_ed.has_sel ? g_ed.sel_clock : (int32_t)( g_ed.h_offset / g_ed.px_per_clock );
-	_set_event( _event_kinds[ t ].kind, clock, unit,
-		(int32_t)gtk_range_get_value( GTK_RANGE( d->value ) ) );
+	_set_event_f( _event_kinds[ t ].kind, clock, unit,
+		gtk_range_get_value( GTK_RANGE( d->value ) ) );
 }
 
 static void _event_dialog()
@@ -787,12 +814,64 @@ static void _event_dialog()
 	gtk_widget_set_hexpand( d->value, TRUE );
 	gtk_grid_attach( GTK_GRID( grid ), gtk_label_new( "value:" ), 0, 1, 1, 1 );
 	gtk_grid_attach( GTK_GRID( grid ), d->value, 1, 1, 1, 1 );
+	g_signal_connect( d->type, "notify::selected", G_CALLBACK( _on_event_type_changed ), d->value );
 
 	gtk_grid_attach( GTK_GRID( grid ), gtk_label_new( "at: view start (snapped), selected unit" ), 0, 2, 2, 1 );
 
 	GtkWidget* btn = gtk_button_new_with_label( "set event" );
 	g_signal_connect( btn, "clicked", G_CALLBACK( _on_event_set_clicked ), d );
 	gtk_grid_attach( GTK_GRID( grid ), btn, 0, 3, 2, 1 );
+
+	gtk_window_present( GTK_WINDOW( win ) );
+}
+
+// ---- unit rename ---------------------------------------------------------
+
+static void _refresh_unit_combo(); // fwd
+
+static void _on_rename_ok( GtkButton*, gpointer user_data )
+{
+	typedef struct { GtkWidget *entry,*dlgwin; } D;
+	D* d = (D*)user_data;
+	int unit = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
+	if( unit < 0 || unit >= g_ed.unit_num ) return;
+
+	const char* text = gtk_editable_get_text( GTK_EDITABLE( d->entry ) );
+	if( !text[0] ){ gtk_window_destroy( GTK_WINDOW( d->dlgwin ) ); delete d; return; }
+
+	SDL_LockAudio();
+	_push_undo();
+	g_ed.pxtn->Unit_Get_variable( unit )->set_name_buf( text, strlen( text ) );
+	SDL_UnlockAudio();
+
+	_refresh_unit_combo();
+	_set_status( "renamed unit %d -> %s", unit, text );
+	gtk_window_destroy( GTK_WINDOW( d->dlgwin ) );
+	delete d;
+}
+
+static void _rename_dialog()
+{
+	typedef struct { GtkWidget *entry,*dlgwin; } D;
+	D* d = new D{};
+
+	GtkWidget* win = gtk_window_new();
+	gtk_window_set_title( GTK_WINDOW( win ), "rename unit" );
+	gtk_window_set_default_size( GTK_WINDOW( win ), 320, 100 );
+	d->dlgwin = win;
+
+	GtkWidget* box = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 6 );
+	gtk_widget_set_margin_start ( box, 10 ); gtk_widget_set_margin_end( box, 10 );
+	gtk_widget_set_margin_top   ( box, 10 ); gtk_widget_set_margin_bottom( box, 10 );
+	gtk_window_set_child( GTK_WINDOW( win ), box );
+
+	d->entry = gtk_entry_new();
+	gtk_widget_set_hexpand( d->entry, TRUE );
+	gtk_box_append( GTK_BOX( box ), d->entry );
+
+	GtkWidget* btn = gtk_button_new_with_label( "rename" );
+	g_signal_connect( btn, "clicked", G_CALLBACK( _on_rename_ok ), d );
+	gtk_box_append( GTK_BOX( box ), btn );
 
 	gtk_window_present( GTK_WINDOW( win ) );
 }
@@ -1216,17 +1295,20 @@ static void _activate( GtkApplication* app, gpointer )
 	GtkWidget* btn_unit  = gtk_button_new_with_label( "+unit" );
 	GtkWidget* btn_sound = gtk_button_new_with_label( "sound..." );
 	GtkWidget* btn_event = gtk_button_new_with_label( "event..." );
+	GtkWidget* btn_rename= gtk_button_new_with_label( "rename" );
 	GtkWidget* btn_song  = gtk_button_new_with_label( "song..." );
 	GtkWidget* btn_play  = gtk_button_new_with_label( "▶ play" );
 	GtkWidget* btn_stop  = gtk_button_new_with_label( "■ stop" );
 	g_signal_connect_swapped( btn_unit,  "clicked", G_CALLBACK( +[]( gpointer ){ _add_unit(); } ), NULL );
 	g_signal_connect_swapped( btn_sound, "clicked", G_CALLBACK( +[]( gpointer ){ _sound_dialog(); } ), NULL );
 	g_signal_connect_swapped( btn_event, "clicked", G_CALLBACK( +[]( gpointer ){ _event_dialog(); } ), NULL );
+	g_signal_connect_swapped( btn_rename,"clicked", G_CALLBACK( +[]( gpointer ){ _rename_dialog(); } ), NULL );
 	g_signal_connect_swapped( btn_song,  "clicked", G_CALLBACK( +[]( gpointer ){ _song_dialog(); } ), NULL );
 	g_signal_connect_swapped( btn_play,  "clicked", G_CALLBACK( +[]( gpointer ){ _start_play(); } ), NULL );
 	g_signal_connect_swapped( btn_stop,  "clicked", G_CALLBACK( +[]( gpointer ){ _stop_play(); } ), NULL );
 	gtk_box_append( GTK_BOX( hbox ), btn_unit );
 	gtk_box_append( GTK_BOX( hbox ), btn_sound );
+	gtk_box_append( GTK_BOX( hbox ), btn_rename );
 	gtk_box_append( GTK_BOX( hbox ), btn_song );
 	gtk_box_append( GTK_BOX( hbox ), btn_event );
 	gtk_box_append( GTK_BOX( hbox ), btn_play );
