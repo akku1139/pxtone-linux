@@ -1494,7 +1494,10 @@ static void _on_drag_begin( GtkGestureDrag* gesture, double x, double y, gpointe
 	{
 		_push_undo();
 		double end_x = ( hit->clock + hit->value ) * g_ed.px_per_clock - g_ed.h_offset;
-		g_ed.mode          = ( x > end_x - 10.0 ) ? DRAG_RESIZE : DRAG_MOVE;
+		// right edge = resize, but only for notes wide enough to click precisely
+		double note_w = hit->value * g_ed.px_per_clock;
+		g_ed.mode          = ( note_w >= 24.0 && x > end_x - 10.0 ) ? DRAG_RESIZE : DRAG_MOVE;
+		g_ed.dragging      = true;
 		g_ed.drag_unit     = unit;
 		g_ed.drag_orig_clk = hit->clock;
 		g_ed.drag_cur_clk  = hit->clock;
