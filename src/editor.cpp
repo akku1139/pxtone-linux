@@ -90,6 +90,7 @@ struct Editor
 	// widgets
 	GtkWidget* window    = NULL;
 	GtkWidget* draw_area = NULL;
+	GtkToggleButton* tb_play = nullptr;
 	GtkAdjustment *hadj = NULL, *vadj = NULL;
 
 	// dialog windows (single instance, driven by toggle buttons)
@@ -345,6 +346,8 @@ static void _stop_play()
 	if( !g_ed.playing ) return;
 	g_ed.playing = false;  // keep the mixer running for previews
 	_set_status( "stopped" );
+	if( g_ed.tb_play && gtk_toggle_button_get_active( g_ed.tb_play ) )
+		gtk_toggle_button_set_active( g_ed.tb_play, FALSE );
 	gtk_widget_queue_draw( g_ed.draw_area );
 }
 
@@ -1663,8 +1666,8 @@ static void _activate( GtkApplication* app, gpointer )
 	GtkWidget* btn_saveas= gtk_button_new_with_label( "save as..." );
 	GtkWidget* btn_undo  = gtk_button_new_with_label( "undo" );
 	GtkWidget* btn_redo  = gtk_button_new_with_label( "redo" );
-	GtkWidget* btn_play  = gtk_button_new_with_label( "▶ play" );
-	GtkWidget* btn_stop  = gtk_button_new_with_label( "■ stop" );
+	GtkWidget* btn_play  = gtk_toggle_button_new_with_label( "▶ play" );
+	GtkToggleButton* tb_stop = nullptr; (void)tb_stop;
 	g_signal_connect_swapped( btn_unit,  "clicked", G_CALLBACK( +[]( gpointer ){ _add_unit(); } ), NULL );
 	// dialog toggles: one window per button, closed by pressing again
 	g_ed.tb_sound  = GTK_TOGGLE_BUTTON( btn_sound );
@@ -1696,8 +1699,12 @@ static void _activate( GtkApplication* app, gpointer )
 			g_ed.pxtn->Unit_Get_variable( i )->set_played( !solo || i == u );
 		_set_status( solo ? "solo: unit %d" : "solo off", u );
 	} ), NULL );
-	g_signal_connect_swapped( btn_play,  "clicked", G_CALLBACK( +[]( gpointer ){ _start_play(); } ), NULL );
-	g_signal_connect_swapped( btn_stop,  "clicked", G_CALLBACK( +[]( gpointer ){ _stop_play(); } ), NULL );
+	// combined play/stop toggle
+	g_signal_connect( btn_play, "toggled", G_CALLBACK( +[]( GtkToggleButton* b, gpointer ){
+		bool active = gtk_toggle_button_get_active( b );
+		if( active && !g_ed.playing ) _start_play();
+		else if( !active && g_ed.playing ) _stop_play();
+	} ), NULL );
 	g_signal_connect_swapped( btn_new,   "clicked", G_CALLBACK( +[]( gpointer ){ _new_tune(); } ), NULL );
 	g_signal_connect_swapped( btn_open,  "clicked", G_CALLBACK( +[]( gpointer ){ _open_dialog(); } ), NULL );
 	g_signal_connect_swapped( btn_saveas,"clicked", G_CALLBACK( +[]( gpointer ){ _save_as_dialog(); } ), NULL );
@@ -1711,7 +1718,6 @@ static void _activate( GtkApplication* app, gpointer )
 	gtk_box_append( GTK_BOX( hbox ), btn_song );
 	gtk_box_append( GTK_BOX( hbox ), btn_event );
 	gtk_box_append( GTK_BOX( hbox ), btn_play );
-	gtk_box_append( GTK_BOX( hbox ), btn_stop );
 	gtk_box_append( GTK_BOX( hbox ), btn_new );
 	gtk_box_append( GTK_BOX( hbox ), btn_open );
 	gtk_box_append( GTK_BOX( hbox ), btn_saveas );
