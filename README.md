@@ -15,13 +15,31 @@ pxtoneの非公式なLinux移植です。オリジナルは [pxtone-play-sample 
 ./build/pxtone-editor <file.ptcop>
 ```
 
-- 左クリック/ドラッグ : ノート追加(スナップ)+長さ変更。追加時にその音程をプレビュー再生
-- 右クリック : ノート削除
-- **+unit** ボタン : トラック(ユニット)追加(自動でwoice割り当て)
-- **sound...** ボタン : 音源作成ダイアログ(PTV波形 / PTNノイズ)。作成して選択中ユニットに割り当て、プレビュー再生
-- ホイール / Shift+ホイール / Ctrl+ホイール : 縦スクロール / 横スクロール / ズーム
-- Space : 再生/停止、Ctrl+S : 上書き保存(.ptcop)
-- キー 1-4 : スナップ(4分/8分/16分/32分)、ヘッダのドロップダウンでユニット選択
+### ノート編集
+- 左クリック(空きセル): ノート設置+プレビュー音。そのままドラッグで長さ調整
+- 既存ノートの本体ドラッグ: 移動(スナップ位置+音程行に追従)
+- 既存ノートの右端ドラッグ: 長さ変更
+- 右クリック/右ドラッグ: ノート削除(連続)
+- Ctrl+C/V: コピー/ペースト、Ctrl+Z/Y: Undo/Redo(最大100ステップ、マスタ設定込み)
+- リサイズ時に既存ノートと重なる場合は自動で切り詰め/削除(pxTone仕様)
+
+### イベント編集(event... ダイアログ)
+velocity / volume / pan volume / pan time / portament / voice no / group no / tuning を編集。
+選択中ノートの位置(またはビュー左端)のスナップ位置に書き込まれます。
+
+### 曲設定(song... ダイアログ)
+tempo / beats per measure / clock per beat / measures / repeat measure / last measure。
+小節線グリッドに反映されます。
+
+### 音源・トラック
+- **+unit**: トラック追加(自動でwoice割り当て)
+- **rename**: ユニット名変更
+- **sound...**: PTV波形(sine/saw/square/triangle/pulse)/ PTNノイズ作成→ユニット割り当て+プレビュー
+
+### 操作
+- ホイール: 縦スクロール / Shift+ホイール: 横スクロール / Ctrl+ホイール: ズーム
+- Space / ▶■ボタン: 再生/停止、Ctrl+S: 上書き保存(.ptcop)
+- キー 1-4: スナップ(4分/8分/16分/32分)
 
 ## 変更点
 
@@ -30,6 +48,20 @@ pxtoneの非公式なLinux移植です。オリジナルは [pxtone-play-sample 
 - `pxtone/` ライブラリ本体はほぼそのまま(OGG Vorbis対応 `pxINCLUDE_OGGVORBIS` を有効化、`pxtnPulse_Oggv.cpp` のgoto跨ぎ初期化を1箇所修正)
 - ビルドはCMake(libvorbis, libogg, SDL2 を使用)
 - コア部分は共有ライブラリ `libpxtn.so` として各アプリからリンク(rpath `$ORIGIN`)
+- 保存は本家pxTone互換の .ptcop 形式のみ(b_tune=false)。独自拡張データは埋め込まない
+
+## テスト
+
+```sh
+cmake --build build && ctest --test-dir build  # または個別に:
+./build/edit_smoke     <sample.ptcop>   # 編集+保存ラウンドトリップ
+./build/history_smoke                   # 移動/コピペ/Undo/Redo
+./build/woice_smoke                     # PTV/PTN音源作成+Moo描画
+./build/event_smoke                     # ベロシティ等イベントのラウンドトリップ
+./build/song_smoke                      # テンポ/拍子等マスタパラメータのラウンドトリップ
+./build/unit_smoke                      # ユニット名+voice/group/tuning/portament
+./build/roundtrip_smoke                 # 全イベント種別+マスタの統合ラウンドトリップ
+```
 
 ## ビルド
 
