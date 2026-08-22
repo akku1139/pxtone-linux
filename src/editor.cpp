@@ -1637,7 +1637,7 @@ static void _activate( GtkApplication* app, gpointer )
 	g_ed.unit_combo = gtk_drop_down_new( G_LIST_MODEL( unit_list ), NULL );
 	gtk_box_append( GTK_BOX( header ), g_ed.unit_combo );
 
-	GtkWidget* btn_new   = gtk_button_new_with_label( "new" );
+	GtkWidget* btn_new   = gtk_button_new_with_label( "new file" );
 	GtkWidget* btn_open  = gtk_button_new_with_label( "open..." );
 	GtkWidget* btn_saveas= gtk_button_new_with_label( "save as..." );
 	GtkWidget* btn_undo  = gtk_button_new_with_label( "undo" );
@@ -1709,7 +1709,8 @@ static void _activate( GtkApplication* app, gpointer )
 
 	// right-side panel notebook
 	g_ed.notebook = gtk_notebook_new();
-	gtk_widget_set_size_request( g_ed.notebook, 330, -1 );
+	gtk_widget_set_size_request( g_ed.notebook, 320, -1 );
+	gtk_widget_set_vexpand( g_ed.notebook, TRUE );
 	const char* names[] = { "sound", "units", "event", "song" };
 	for( int i = 0; i < 4; i++ )
 		gtk_notebook_append_page( GTK_NOTEBOOK( g_ed.notebook ),
@@ -2097,6 +2098,9 @@ static void _on_snap_changed( GtkDropDown*, GParamSpec*, gpointer )
 static GtkWidget* _make_scrolled_page()
 {
 	GtkWidget* sw = gtk_scrolled_window_new();
+	gtk_widget_set_hexpand( sw, TRUE );
+	gtk_widget_set_vexpand( sw, TRUE );
+	gtk_widget_set_size_request( sw, 300, 400 );
 	gtk_scrolled_window_set_policy( GTK_SCROLLED_WINDOW( sw ),
 		GtkPolicyType::GTK_POLICY_NEVER, GtkPolicyType::GTK_POLICY_AUTOMATIC );
 	GtkWidget* vbox = gtk_box_new( GTK_ORIENTATION_VERTICAL, 0 );
