@@ -1477,8 +1477,32 @@ static void _on_drag_end( GtkGestureDrag*, double, double, gpointer )
 	g_ed.mode     = DRAG_NONE;
 }
 
+static bool _point_in_range( double x, double y )
+{
+	if( !g_ed.has_range ) return false;
+	int32_t clock; int row;
+	if( !_screen_to_clock_row( (int)x, (int)y, &clock, &row ) ) return false;
+	int32_t c0 = MIN( g_ed.rg_c0, g_ed.rg_c1 ), c1 = MAX( g_ed.rg_c0, g_ed.rg_c1 );
+	int r0 = MIN( g_ed.rg_r0, g_ed.rg_r1 ), r1 = MAX( g_ed.rg_r0, g_ed.rg_r1 );
+	return ( clock >= c0 && clock < c1 && row >= r0 && row <= r1 );
+}
+
+static void _delete_range_notes()
+{
+	int unit = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
+	int32_t c0 = MIN( g_ed.rg_c0, g_ed.rg_c1 ), c1 = MAX( g_ed.rg_c0, g_ed.rg_c1 );
+	SDL_LockAudio();
+	_push_undo();
+	int n = g_ed.pxtn->evels->Record_Delete( c0, c1, (uint8_t)unit, EVENTKIND_ON );
+	SDL_UnlockAudio();
+	_set_status( "deleted %d notes in range", n );
+	gtk_widget_queue_draw( g_ed.draw_area );
+}
+
 static void _on_rdrag_begin( GtkGestureDrag*, double x, double y, gpointer )
 {
+	if( _point_in_range( x, y ) ){ _delete_range_notes(); return; } // whole range at once
+	_clear_selection(); // right-click outside the range clears the selection
 	int32_t clock; int row;
 	if( _screen_to_clock_row( (int)x, (int)y, &clock, &row ) ) _delete_note( clock, row );
 }
@@ -1486,6 +1510,13 @@ static void _on_rdrag_update( GtkGestureDrag* gesture, double, double, gpointer 
 {
 	double x = 0, y = 0;
 	gtk_gesture_get_point( GTK_GESTURE( gesture ), NULL, &x, &y );
+	if( _point_in_range( x, y ) )
+	{
+		// continuous delete inside an active range
+		_delete_range_notes();
+		g_ed.has_range = false; // cleared after one-shot bulk delete
+		return;
+	}
 	int32_t clock; int row;
 	if( _screen_to_clock_row( (int)x, (int)y, &clock, &row ) ) _delete_note( clock, row );
 }
