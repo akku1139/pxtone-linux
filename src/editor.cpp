@@ -1634,6 +1634,11 @@ static bool _init_new_project()
 	v->wave.points = (pxtnPOINT*)malloc( sizeof( pxtnPOINT ) * 32 );
 	_make_wave_points( 0, v->wave.points, &v->wave.num ); // sine
 
+	// the unit must have a tone-ready woice, or Moo/preview will crash
+	if( g_ed.pxtn->Woice_ReadyTone( w ) != pxtnOK ) return false;
+	g_ed.pxtn->Unit_Get_variable( 0 )->set_woice( wv );
+	g_ed.pxtn->Unit_Get_variable( 0 )->set_name_buf( "unit 0", 6 );
+
 	// reset editor state
 	g_undo.clear(); g_redo.clear(); g_clipboard.clear();
 	g_ed.has_sel = false; g_ed.dragging = false; g_ed.mode = DRAG_NONE;
