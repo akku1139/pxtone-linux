@@ -768,6 +768,7 @@ static void _add_unit()
 		g_ed.pxtn->Unit_AddNew() ? 1 : 0 );
 	int idx = g_ed.pxtn->Unit_Num() - 1;
 	if( idx < 0 || idx <= g_ed.unit_num - 1 ){ _set_status( "unit max reached" ); return; }
+	g_ed.unit_num = idx + 1;
 	// assign woice 0 (create one if the tune has none)
 	if( g_ed.pxtn->Woice_Num() == 0 )
 	{
@@ -880,18 +881,22 @@ static bool _build_sound_woice( pxtnWoice* w, int type, int wave, int volume, in
 	}
 	else // PTN noise
 	{
-		if( !v->p_ptn->Allocate( 1, 0 ) ) return false;
+		// NOTE: enve_num == 0 makes the noise builder scale everything by
+		// enve_mag_start (0) => total silence. Always provide one point.
+		if( !v->p_ptn->Allocate( 1, 1 ) ) return false;
 		pxNOISEDESIGN_UNIT* du = v->p_ptn->get_unit( 0 );
 		du->bEnable = true;
-		du->enve_num = 0;
+		du->enve_num = 1; du->enves[0].x = 10; du->enves[0].y = 100; // 10ms ramp to 100%
 		du->pan    = 64;
 		du->main.type   = (pxWAVETYPE)( pxWAVETYPE_None + 1 + noise_type );
 		du->main.freq   = (float)nfreq;
-		du->main.volume = (float)nvol;
+		du->main.volume = (float)nvol * 100; // design values are percentages
 		du->main.offset = (float)noffset;
 		du->main.b_rev  = false;
 		du->freq.type = pxWAVETYPE_None; du->freq.volume = 0;
-		du->volu.type = pxWAVETYPE_None; du->volu.volume = 0;
+		// NOTE: volu == None yields a zero volume table (silence); use a constant
+		du->volu.type = pxWAVETYPE_Sine; du->volu.freq = 0;
+		du->volu.volume = 100; du->volu.offset = 25; du->volu.b_rev = false; // constant full volume
 		v->p_ptn->set_smp_num_44k( _SAMPLE_PER_SECOND / 4 ); // 0.25s
 		v->p_ptn->Fix();
 
@@ -921,9 +926,21 @@ static void _wave_canvas_cb( GtkDrawingArea*, cairo_t* cr, int w, int h, gpointe
 
 	if( gtk_drop_down_get_selected( GTK_DROP_DOWN( d->type ) ) != 0 )
 	{
-		// noise: flat line
-		cairo_set_source_rgb( cr, 0.6, 0.6, 0.7 );
-		cairo_move_to( cr, 4, h / 2 ); cairo_line_to( cr, w - 4, h / 2 ); cairo_stroke( cr );
+		// noise: draw the selected oscillator waveform
+		int nsel = (int)gtk_drop_down_get_selected( GTK_DROP_DOWN( d->ntype ) );
+		if( nsel < 0 ) return;
+		pxtnPOINT pts[ 32 ]; int32_t n = 0;
+		_make_wave_points( nsel, pts, &n );
+		cairo_set_source_rgb( cr, 0.9, 0.7, 0.35 );
+		cairo_set_line_width( cr, 2 );
+		for( int i = 0; i <= n; i++ )
+		{
+			const pxtnPOINT& pt = pts[ i % n ];
+			double x = 4 + ( w - 8 ) * pt.x / 10000.0;
+			double y = h / 2 - h * 0.4 * pt.y / 128.0;
+			if( i == 0 ) cairo_move_to( cr, x, y ); else cairo_line_to( cr, x, y );
+		}
+		cairo_stroke( cr );
 		return;
 	}
 
@@ -987,7 +1004,7 @@ static void _audition_sound( int type, int wave, int volume, int basic_row,
 static void _on_audition_clicked( GtkButton*, gpointer user_data )
 {
 	SoundDlg* d = (SoundDlg*)user_data;
-	int dur_sec_pct = (int)gtk_range_get_value( GTK_RANGE( d->aurlen ) ); // 5..200 (% of 0.35s)
+	int dur_sec_pct = (int)gtk_spin_button_get_value( GTK_SPIN_BUTTON( d->aurlen ) ); // % of 0.35s
 	_audition_sound(
 		(int)gtk_drop_down_get_selected( GTK_DROP_DOWN( d->type ) ),
 		(int)gtk_drop_down_get_selected( GTK_DROP_DOWN( d->wave ) ),
