@@ -1530,10 +1530,10 @@ static void _build_sound_page( GtkWidget* parent )
 	gtk_grid_attach( GTK_GRID( grid ), d->aurlen, 1, r++, 1, 1 );
 
 	// live update: redraw + audition on any change
-	auto live = +[]( gpointer ){ gtk_widget_queue_draw( g_snd.canvas ); _snd_live_audition(); };
+	auto live = +[](){ gtk_widget_queue_draw( g_snd.canvas ); _snd_live_audition(); };
 	for( GtkWidget* w : { d->type, d->wave, d->ntype } )
-		g_signal_connect_swapped( w, "notify::selected",
-			G_CALLBACK( +[]( gpointer inst, gpointer fn ){ ((void(*)())fn)(); } ), (gpointer)live );
+		g_signal_connect( w, "notify::selected",
+			G_CALLBACK( +[]( GObject*, GParamSpec*, gpointer fn ){ ((void(*)())fn)(); } ), (gpointer)live );
 	for( GtkWidget* w : { d->volume, d->basic_row, d->nfreq, d->noffset, d->nvol, d->audkey, d->aurlen } )
 		g_signal_connect( w, "value-changed", G_CALLBACK( +[]( GtkWidget*, gpointer fn ){ ((void(*)())fn)(); } ),
 			(gpointer)live );
@@ -1588,6 +1588,7 @@ static void _build_units_page( GtkWidget* parent )
 	gtk_box_append( GTK_BOX( rbox ), rbtn );
 	gtk_box_append( GTK_BOX( vbox ), rbox );
 
+	gtk_box_append( GTK_BOX( parent ), vbox );
 	_units_refresh();
 }
 
