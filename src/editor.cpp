@@ -98,6 +98,9 @@ struct Editor
 	GtkWidget* win_event = NULL;  GtkToggleButton* tb_event  = NULL;
 	GtkWidget* win_song  = NULL;  GtkToggleButton* tb_song   = NULL;
 	GtkWidget* win_rename= NULL;  GtkToggleButton* tb_rename = NULL;
+	GtkWidget* win_units = NULL;  GtkToggleButton* tb_units  = NULL;
+	GtkWidget* units_list  = NULL;
+	GtkWidget* units_stats = NULL;
 	bool file_dlg_busy = false;
 	GtkWidget* unit_combo = NULL;
 	GtkWidget* snap_combo = NULL;
@@ -131,7 +134,7 @@ static void _preview_note( int unit, int row, int32_t clock, int dur_frames = -1
 
 static void _win_destroyed( GtkWidget*, gpointer );
 static void _on_toggle_dialog( GtkToggleButton*, gpointer );
-static gpointer g_bind_sound[3], g_bind_event[3], g_bind_song[3], g_bind_rename[3];
+static gpointer g_bind_sound[3], g_bind_event[3], g_bind_song[3], g_bind_rename[3], g_bind_units[3];
 
 // ---- undo/redo (project snapshots) --------------------------------------
 
@@ -525,7 +528,155 @@ static void _save()
 }
 
 static void _refresh_unit_combo(); // fwd
+static void _units_refresh(); // fwd
 static void _make_wave_points( int type, pxtnPOINT* pts, int32_t* p_num ); // fwd
+static void _add_unit(); // fwd
+
+// ---- units panel ---------------------------------------------------------
+
+static void _refresh_unit_combo(); // fwd
+static void _units_refresh();      // fwd
+
+static void _delete_unit( int idx )
+{
+	if( idx < 0 || idx >= g_ed.unit_num || g_ed.unit_num <= 1 )
+		{ _set_status( "cannot delete the last unit" ); return; }
+
+	SDL_LockAudio();
+	_push_undo();
+	// drop events of the deleted unit, then shift higher unit numbers down
+	g_ed.pxtn->evels->Record_UnitNo_Miss( (uint8_t)idx );
+	for( int u = idx + 1; u < g_ed.unit_num; u++ )
+		g_ed.pxtn->evels->Record_UnitNo_Replace( (uint8_t)u, (uint8_t)( u - 1 ) );
+	g_ed.pxtn->Unit_Remove( idx );
+	SDL_UnlockAudio();
+
+	g_ed.unit_num--;
+	int sel = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
+	if( sel >= g_ed.unit_num ) gtk_drop_down_set_selected( GTK_DROP_DOWN( g_ed.unit_combo ), g_ed.unit_num - 1 );
+	_refresh_unit_combo();
+	_units_refresh();
+	_set_status( "removed unit %d", idx );
+}
+
+static void _units_refresh()
+{
+	if( !g_ed.units_list || !g_ed.pxtn ) return;
+
+	// clear rows
+	GtkWidget* child = gtk_widget_get_first_child( g_ed.units_list );
+	while( child )
+	{
+		GtkWidget* next = gtk_widget_get_next_sibling( child );
+		gtk_list_box_remove( GTK_LIST_BOX( g_ed.units_list ), child );
+		child = next;
+	}
+
+	int sel = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
+	int total_events = 0;
+
+	for( int i = 0; i < g_ed.unit_num; i++ )
+	{
+		int32_t size = 0;
+		const char* name = g_ed.pxtn->Unit_Get( i )->get_name_buf( &size );
+		int events = g_ed.pxtn->evels->get_Count( (uint8_t)i );
+		int notes  = g_ed.pxtn->evels->get_Count( (uint8_t)i, EVENTKIND_ON );
+		total_events += events;
+
+		GtkWidget* row = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 6 );
+
+		GtkWidget* lbl = gtk_label_new( NULL );
+		char txt[ 256 ];
+		snprintf( txt, sizeof( txt ), "%d: %s   (%d events / %d notes)%s",
+			i, name && name[0] ? name : "(no name)", events, notes,
+			i == sel ? "  <" : "" );
+		gtk_label_set_text( GTK_LABEL( lbl ), txt );
+		gtk_widget_set_hexpand( lbl, TRUE );
+		gtk_widget_set_halign( lbl, GTK_ALIGN_START );
+		gtk_box_append( GTK_BOX( row ), lbl );
+
+		GtkWidget* use = gtk_check_button_new_with_label( "audible" );
+		gtk_toggle_button_set_active( GTK_TOGGLE_BUTTON( use ), g_ed.pxtn->Unit_Get( i )->get_played() );
+		g_object_set_data( G_OBJECT( use ), "unit-idx", GINT_TO_POINTER( i ) );
+		g_signal_connect( use, "toggled", G_CALLBACK( +[]( GtkToggleButton* b, gpointer ud ){
+			int i = GPOINTER_TO_INT( g_object_get_data( G_OBJECT( b ), "unit-idx" ) );
+			g_ed.pxtn->Unit_Get_variable( i )->set_played( gtk_toggle_button_get_active( b ) );
+			_set_status( "unit %d %s", i, gtk_toggle_button_get_active( b ) ? "audible" : "muted" );
+		} ), NULL );
+		gtk_box_append( GTK_BOX( row ), use );
+
+		if( g_ed.unit_num > 1 )
+		{
+			GtkWidget* del = gtk_button_new_with_label( "del" );
+			g_object_set_data( G_OBJECT( del ), "unit-idx", GINT_TO_POINTER( i ) );
+			g_signal_connect_swapped( del, "clicked", G_CALLBACK( +[]( gpointer ud ){
+				_delete_unit( GPOINTER_TO_INT( ud ) );
+			} ), GINT_TO_POINTER( i ) );
+			gtk_box_append( GTK_BOX( row ), del );
+		}
+
+		gtk_list_box_append( GTK_LIST_BOX( g_ed.units_list ), row );
+	}
+
+	if( g_ed.units_stats )
+	{
+		char txt[ 128 ];
+		int notes = 0;
+		for( const EVERECORD* p = g_ed.pxtn->evels->get_Records(); p; p = p->next )
+			if( p->kind == EVENTKIND_ON ) notes++;
+		snprintf( txt, sizeof( txt ), "units: %d   total events: %d   total notes: %d",
+			g_ed.unit_num, total_events, notes );
+		gtk_label_set_text( GTK_LABEL( g_ed.units_stats ), txt );
+	}
+}
+
+static void _on_unit_row_selected( GtkListBox*, GtkListBoxRow* row, gpointer )
+{
+	if( row )
+	{
+		int i = gtk_list_box_row_get_index( row );
+		if( i >= 0 && i < g_ed.unit_num )
+			gtk_drop_down_set_selected( GTK_DROP_DOWN( g_ed.unit_combo ), i );
+	}
+}
+
+static void _units_dialog()
+{
+	GtkWidget* win = gtk_window_new();
+	gtk_window_set_title( GTK_WINDOW( win ), "units" );
+	gtk_window_set_default_size( GTK_WINDOW( win ), 460, 400 );
+	g_ed.win_units = win;
+
+	GtkWidget* vbox = gtk_box_new( GTK_ORIENTATION_VERTICAL, 6 );
+	gtk_widget_set_margin_start ( vbox, 10 ); gtk_widget_set_margin_end  ( vbox, 10 );
+	gtk_widget_set_margin_top   ( vbox, 10 ); gtk_widget_set_margin_bottom( vbox, 10 );
+	gtk_window_set_child( GTK_WINDOW( win ), vbox );
+
+	GtkWidget* sw = gtk_scrolled_window_new();
+	gtk_widget_set_vexpand( sw, TRUE );
+	gtk_scrolled_window_set_policy( GTK_SCROLLED_WINDOW( sw ), GtkPolicyType::GTK_POLICY_NEVER, GtkPolicyType::GTK_POLICY_AUTOMATIC );
+	gtk_box_append( GTK_BOX( vbox ), sw );
+
+	g_ed.units_list = gtk_list_box_new();
+	gtk_list_box_set_selection_mode( GTK_LIST_BOX( g_ed.units_list ), GTK_SELECTION_SINGLE );
+	g_signal_connect( g_ed.units_list, "row-selected", G_CALLBACK( _on_unit_row_selected ), NULL );
+	gtk_scrolled_window_set_child( GTK_SCROLLED_WINDOW( sw ), g_ed.units_list );
+
+	GtkWidget* hbox = gtk_box_new( GTK_ORIENTATION_HORIZONTAL, 6 );
+	gtk_box_append( GTK_BOX( vbox ), hbox );
+
+	GtkWidget* btn_add = gtk_button_new_with_label( "+ add unit" );
+	g_signal_connect_swapped( btn_add, "clicked", G_CALLBACK( +[]( gpointer ){ _add_unit(); } ), NULL );
+	gtk_box_append( GTK_BOX( hbox ), btn_add );
+
+	g_ed.units_stats = gtk_label_new( "" );
+	gtk_widget_set_hexpand( g_ed.units_stats, TRUE );
+	gtk_widget_set_halign( g_ed.units_stats, GTK_ALIGN_END );
+	gtk_box_append( GTK_BOX( vbox ), g_ed.units_stats );
+
+	_units_refresh();
+	gtk_window_present( GTK_WINDOW( win ) );
+}
 
 // ---- new tune ------------------------------------------------------------
 
@@ -718,32 +869,6 @@ static void _preview_note( int unit, int row, int32_t clock, int dur_frames )
 	_preview_woice( woice, row, dur_frames );
 }
 
-// ---- unit mute / solo ---------------------------------------------------
-
-static void _set_all_played( bool b )
-{
-	for( int i = 0; i < g_ed.unit_num; i++ )
-		g_ed.pxtn->Unit_Get_variable( i )->set_played( b );
-}
-
-static void _mute_selected()
-{
-	int u = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
-	if( u < 0 || u >= g_ed.unit_num ) return;
-	pxtnUnit* un = g_ed.pxtn->Unit_Get_variable( u );
-	un->set_played( !un->get_played() );
-	_set_status( "unit %d %s", u, un->get_played() ? "unmuted" : "MUTED" );
-}
-
-static void _solo_selected()
-{
-	int u = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
-	if( u < 0 || u >= g_ed.unit_num ) return;
-	for( int i = 0; i < g_ed.unit_num; i++ )
-		g_ed.pxtn->Unit_Get_variable( i )->set_played( i == u );
-	_set_status( "solo: unit %d", u );
-}
-
 // ---- track (unit) add ---------------------------------------------------
 
 static void _refresh_unit_combo()
@@ -759,6 +884,7 @@ static void _refresh_unit_combo()
 	gtk_drop_down_set_model( GTK_DROP_DOWN( g_ed.unit_combo ), G_LIST_MODEL( list ) );
 	g_object_unref( list );
 	if( g_ed.unit_num > 0 ) gtk_drop_down_set_selected( GTK_DROP_DOWN( g_ed.unit_combo ), g_ed.unit_num - 1 );
+	_units_refresh();
 }
 
 static void _add_unit()
@@ -889,6 +1015,7 @@ static bool _build_sound_woice( pxtnWoice* w, int type, int wave, int volume, in
 		du->enve_num = 1; du->enves[0].x = 10; du->enves[0].y = 100; // 10ms ramp to 100%
 		du->pan    = 64;
 		du->main.type   = (pxWAVETYPE)( pxWAVETYPE_None + 1 + noise_type );
+		if( nfreq < 50 ) nfreq = 400; // guard against inaudible low frequencies
 		du->main.freq   = (float)nfreq;
 		du->main.volume = (float)nvol * 100; // design values are percentages
 		du->main.offset = (float)noffset;
@@ -1827,12 +1954,9 @@ static void _activate( GtkApplication* app, gpointer )
 	g_ed.unit_combo = gtk_drop_down_new( G_LIST_MODEL( unit_list ), NULL );
 	gtk_box_append( GTK_BOX( hbox ), g_ed.unit_combo );
 
-	GtkWidget* btn_unit  = gtk_button_new_with_label( "+unit" );
+	GtkWidget* btn_units = gtk_toggle_button_new_with_label( "units..." );
 	GtkWidget* btn_sound = gtk_toggle_button_new_with_label( "sound..." );
 	GtkWidget* btn_event = gtk_toggle_button_new_with_label( "event..." );
-	GtkWidget* btn_rename= gtk_toggle_button_new_with_label( "rename" );
-	GtkWidget* btn_mute  = gtk_toggle_button_new_with_label( "mute" );
-	GtkWidget* btn_solo  = gtk_toggle_button_new_with_label( "solo" );
 	GtkWidget* btn_song  = gtk_toggle_button_new_with_label( "song..." );
 	GtkWidget* btn_new   = gtk_button_new_with_label( "new" );
 	GtkWidget* btn_open  = gtk_button_new_with_label( "open..." );
@@ -1841,37 +1965,20 @@ static void _activate( GtkApplication* app, gpointer )
 	GtkWidget* btn_redo  = gtk_button_new_with_label( "redo" );
 	GtkWidget* btn_play  = gtk_toggle_button_new_with_label( "▶ play" );
 	GtkToggleButton* tb_stop = nullptr; (void)tb_stop;
-	g_signal_connect_swapped( btn_unit,  "clicked", G_CALLBACK( +[]( gpointer ){ _add_unit(); } ), NULL );
 	// dialog toggles: one window per button, closed by pressing again
 	g_ed.tb_sound  = GTK_TOGGLE_BUTTON( btn_sound );
 	g_ed.tb_event  = GTK_TOGGLE_BUTTON( btn_event );
-	g_ed.tb_rename = GTK_TOGGLE_BUTTON( btn_rename );
+	g_ed.tb_units  = GTK_TOGGLE_BUTTON( btn_units );
 	g_ed.tb_song   = GTK_TOGGLE_BUTTON( btn_song );
 	g_bind_sound [0] = &g_ed.win_sound;  g_bind_sound [1] = btn_sound; g_bind_sound [2] = (gpointer)_sound_dialog;
 	g_bind_event [0] = &g_ed.win_event;  g_bind_event [1] = btn_event; g_bind_event [2] = (gpointer)_event_dialog;
-	g_bind_rename[0] = &g_ed.win_rename; g_bind_rename[1] = btn_rename; g_bind_rename[2] = (gpointer)_rename_dialog;
+	g_bind_units [0] = &g_ed.win_units;  g_bind_units [1] = btn_units; g_bind_units [2] = (gpointer)_units_dialog;
 	g_bind_song  [0] = &g_ed.win_song;   g_bind_song  [1] = btn_song;  g_bind_song  [2] = (gpointer)_song_dialog;
 	g_signal_connect( btn_sound, "toggled", G_CALLBACK( _on_toggle_dialog ), g_bind_sound );
 	g_signal_connect( btn_event, "toggled", G_CALLBACK( _on_toggle_dialog ), g_bind_event );
-	g_signal_connect( btn_rename,"toggled", G_CALLBACK( _on_toggle_dialog ), g_bind_rename );
+	g_signal_connect( btn_units, "toggled", G_CALLBACK( _on_toggle_dialog ), g_bind_units );
 	g_signal_connect( btn_song,  "toggled", G_CALLBACK( _on_toggle_dialog ), g_bind_song );
 
-	// mute / solo toggles for the selected unit
-	g_signal_connect( btn_mute, "toggled", G_CALLBACK( +[]( GtkToggleButton* b, gpointer ){
-		int u = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
-		if( u < 0 || u >= g_ed.unit_num ) return;
-		bool muted = gtk_toggle_button_get_active( b );
-		g_ed.pxtn->Unit_Get_variable( u )->set_played( !muted );
-		_set_status( "unit %d %s", u, muted ? "MUTED" : "unmuted" );
-	} ), NULL );
-	g_signal_connect( btn_solo, "toggled", G_CALLBACK( +[]( GtkToggleButton* b, gpointer ){
-		int u = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
-		if( u < 0 || u >= g_ed.unit_num ) return;
-		bool solo = gtk_toggle_button_get_active( b );
-		for( int i = 0; i < g_ed.unit_num; i++ )
-			g_ed.pxtn->Unit_Get_variable( i )->set_played( !solo || i == u );
-		_set_status( solo ? "solo: unit %d" : "solo off", u );
-	} ), NULL );
 	// combined play/stop toggle
 	g_signal_connect( btn_play, "toggled", G_CALLBACK( +[]( GtkToggleButton* b, gpointer ){
 		fprintf( stderr, "[play-btn] toggled active=%d playing=%d\n",
@@ -1885,13 +1992,10 @@ static void _activate( GtkApplication* app, gpointer )
 	g_signal_connect_swapped( btn_saveas,"clicked", G_CALLBACK( +[]( gpointer ){ _save_as_dialog(); } ), NULL );
 	g_signal_connect_swapped( btn_undo,  "clicked", G_CALLBACK( +[]( gpointer ){ _undo(); } ), NULL );
 	g_signal_connect_swapped( btn_redo,  "clicked", G_CALLBACK( +[]( gpointer ){ _redo(); } ), NULL );
-	gtk_box_append( GTK_BOX( hbox ), btn_unit );
 	gtk_box_append( GTK_BOX( hbox ), btn_sound );
-	gtk_box_append( GTK_BOX( hbox ), btn_rename );
-	gtk_box_append( GTK_BOX( hbox ), btn_mute );
-	gtk_box_append( GTK_BOX( hbox ), btn_solo );
 	gtk_box_append( GTK_BOX( hbox ), btn_song );
 	gtk_box_append( GTK_BOX( hbox ), btn_event );
+	gtk_box_append( GTK_BOX( hbox ), btn_units );
 	gtk_box_append( GTK_BOX( hbox ), btn_play );
 	gtk_box_append( GTK_BOX( hbox ), btn_new );
 	gtk_box_append( GTK_BOX( hbox ), btn_open );
