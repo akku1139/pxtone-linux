@@ -1540,6 +1540,27 @@ static void _build_sound_page( GtkWidget* parent )
 
 	// initial visibility
 	gtk_drop_down_set_selected( GTK_DROP_DOWN( d->type ), 0 );
+
+	// buttons
+	GtkWidget* btn_aud = gtk_button_new_with_label( "audition" );
+	g_signal_connect( btn_aud, "clicked", G_CALLBACK( +[]( GtkButton*, gpointer ){
+		_snd_live_audition();
+	} ), NULL );
+	gtk_grid_attach( GTK_GRID( grid ), btn_aud, 0, r, 1, 1 );
+
+	GtkWidget* btn_create = gtk_button_new_with_label( "create & assign" );
+	g_signal_connect( btn_create, "clicked", G_CALLBACK( +[]( GtkButton*, gpointer ){
+		_create_sound(
+			(int)gtk_drop_down_get_selected( GTK_DROP_DOWN( g_snd.type ) ),
+			(int)gtk_drop_down_get_selected( GTK_DROP_DOWN( g_snd.wave ) ),
+			(int)gtk_range_get_value( GTK_RANGE( g_snd.volume ) ),
+			(int)gtk_spin_button_get_value( GTK_SPIN_BUTTON( g_snd.basic_row ) ),
+			(int)gtk_drop_down_get_selected( GTK_DROP_DOWN( g_snd.ntype ) ),
+			gtk_spin_button_get_value( GTK_SPIN_BUTTON( g_snd.nfreq ) ),
+			gtk_spin_button_get_value( GTK_SPIN_BUTTON( g_snd.noffset ) ),
+			gtk_range_get_value( GTK_RANGE( g_snd.nvol ) ) );
+	} ), NULL );
+	gtk_grid_attach( GTK_GRID( grid ), btn_create, 1, r, 1, 1 );
 }
 
 
