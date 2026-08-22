@@ -1180,6 +1180,12 @@ static bool _screen_to_clock_row( int x, int y, int32_t* p_clock, int* p_row )
 
 static void _draw_cb( GtkDrawingArea*, cairo_t* cr, int w, int h, gpointer )
 {
+	static int dbg_n = 0;
+	if( ++dbg_n % 30 == 1 )
+		fprintf( stderr, "[draw] #%d w=%d h=%d has_range=%d rect_vis=%d has_sel=%d multi=%d\n",
+			dbg_n, w, h, g_ed.has_range?1:0, g_ed.range_rect_visible?1:0,
+			g_ed.has_sel?1:0, (int)g_ed.multi.size() );
+
 	cairo_set_source_rgb( cr, 0.06, 0.06, 0.10 );
 	cairo_paint( cr );
 
@@ -1394,6 +1400,7 @@ static void _draw_cb( GtkDrawingArea*, cairo_t* cr, int w, int h, gpointer )
 
 
 	// white outline on every selected note
+	int dbg_outlined = 0;
 	{
 		int su = gtk_drop_down_get_selected( GTK_DROP_DOWN( g_ed.unit_combo ) );
 		for( const EVERECORD* q = g_ed.pxtn ? g_ed.pxtn->evels->get_Records() : NULL; q; q = q->next )
@@ -1401,6 +1408,7 @@ static void _draw_cb( GtkDrawingArea*, cairo_t* cr, int w, int h, gpointer )
 			if( q->kind != EVENTKIND_ON || q->unit_no != su ) continue;
 			int k = g_ed.pxtn->evels->get_Value( q->clock, (uint8_t)su, EVENTKIND_KEY ) >> 8;
 			if( !_note_selected( q->clock, k ) ) continue;
+			dbg_outlined++;
 			double x0 = q->clock * g_ed.px_per_clock - g_ed.h_offset;
 			double x1 = ( q->clock + ( q->value > 0 ? q->value : g_ed.snap ) ) * g_ed.px_per_clock - g_ed.h_offset;
 			double y  = ( _ROW_MAX - MIN( MAX( k, _ROW_MIN ), _ROW_MAX ) ) * _ROW_H - g_ed.v_offset;
@@ -1410,6 +1418,7 @@ static void _draw_cb( GtkDrawingArea*, cairo_t* cr, int w, int h, gpointer )
 			cairo_set_line_width( cr, 1.0 );
 		}
 	}
+	if( dbg_n % 30 == 1 ) fprintf( stderr, "[draw] outlined=%d\n", dbg_outlined );
 
 	// paste position marker (dashed white)
 	if( g_ed.has_paste_pos )
@@ -1636,6 +1645,8 @@ static void _finish_drag()
 	}
 	if( g_ed.mode == DRAG_RANGE )
 	{
+		fprintf( stderr, "[drag-end] RANGE c0=%d c1=%d r0=%d r1=%d\n",
+			g_ed.rg_c0, g_ed.rg_c1, g_ed.rg_r0, g_ed.rg_r1 );
 		g_ed.range_rect_visible = false; // confirmed: hide rect, show outlines
 		g_ed.rg_c0 = MIN( g_ed.rg_c0, g_ed.rg_c1 );
 		g_ed.rg_c1 = MAX( g_ed.rg_c0, g_ed.rg_c1 );
