@@ -83,6 +83,8 @@ struct Editor
 
 	// multi / range selection
 	struct SelNote { int32_t clock; int key; };
+	struct MoveEnt  { int32_t oc; int key; int32_t dur; };
+	std::vector<MoveEnt> move_set;
 	bool                 has_multi = false;
 	std::vector<SelNote> multi;
 	bool    has_pstart   = false;
@@ -859,15 +861,17 @@ static void _drag_update( int x, int y )
 	}
 	else if( g_ed.mode == DRAG_MOVE )
 	{
-		// ghost move: nothing is mutated until the drop
+		// ghost move: nothing is mutated until the drop; cur_* hold DELTAS
+		int32_t dc = c - g_ed.drag_orig_clk;
 		int row = _ROW_MAX - (int)floor( ( y + g_ed.v_offset ) / (double)_ROW_H );
-		if( row < _ROW_MIN ) row = _ROW_MIN;
+		if( row < _ROW_MIN + g_ed.drag_orig_row - _ROW_MIN ) {} // clamp below
 		if( row > _ROW_MAX ) row = _ROW_MAX;
-		if( c == g_ed.drag_cur_clk && row == g_ed.drag_cur_row ) return;
-		g_ed.drag_cur_clk = c;
-		g_ed.drag_cur_row = row;
-		g_ed.sel_clock    = c;
-		g_ed.sel_row      = row;
+		if( row < _ROW_MIN ) row = _ROW_MIN;
+		int32_t dr = row - ( g_ed.drag_orig_row );
+		if( dc == g_ed.drag_cur_clk && dr == g_ed.drag_cur_row ) return;
+		g_ed.drag_cur_clk = dc;
+		g_ed.drag_cur_row = dr;
+		g_ed.sel_clock    = g_ed.move_set.empty() ? c : g_ed.move_set[0].oc + dc;
 	}
 	else if( g_ed.mode == DRAG_STRETCH && g_ed.dragging )
 	{
@@ -1230,7 +1234,9 @@ static void _draw_cb( GtkDrawingArea*, cairo_t* cr, int w, int h, gpointer )
 	for( const EVERECORD* p = g_ed.pxtn ? g_ed.pxtn->evels->get_Records() : NULL; p; p = p->next )
 	{
 		if( p->kind != EVENTKIND_ON ) continue;
-		if( moving && p->unit_no == g_ed.drag_unit && p->clock == g_ed.drag_orig_clk ) continue;
+				bool isorig = false;
+		for( auto& e : g_ed.move_set ) if( e.oc == p->clock ) { isorig = true; break; }
+		if( moving && p->unit_no == g_ed.drag_unit && isorig ) continue;
 
 		double x0 = p->clock * g_ed.px_per_clock - g_ed.h_offset;
 		double x1 = ( p->clock + ( p->value > 0 ? p->value : g_ed.snap ) ) * g_ed.px_per_clock - g_ed.h_offset;
@@ -1327,23 +1333,31 @@ static void _draw_cb( GtkDrawingArea*, cairo_t* cr, int w, int h, gpointer )
 		}
 	}
 
-	// moving: hide original, draw conflict outlines
-	bool mv = ( g_ed.mode == DRAG_MOVE && g_ed.dragging );
-	if( g_ed.mode == DRAG_RESIZE && g_ed.dragging ) { /* conflicts drawn below */ }
-	bool resizing = ( g_ed.mode == DRAG_RESIZE && g_ed.dragging );
-	if( mv || resizing )
+	// moving/resizing: draw ghosts at target positions + red conflict outlines
+	bool resizing= ( g_ed.mode == DRAG_RESIZE && g_ed.dragging );
+	if( moving || resizing )
 	{
-		int32_t nc = resizing ? g_ed.drag_orig_clk : g_ed.drag_cur_clk;
-		int32_t dur = g_ed.drag_dur;
+		int32_t dc = g_ed.drag_cur_clk, dr = g_ed.drag_cur_row;
+
+		// red outlines on non-move-set notes that would be deleted
 		for( const EVERECORD* p = g_ed.pxtn->evels->get_Records(); p; p = p->next )
 		{
 			if( p->kind != EVENTKIND_ON || p->unit_no != g_ed.drag_unit ) continue;
-			if( p->clock == g_ed.drag_orig_clk ) continue;
-			bool conflict =
-				( p->clock < nc && p->clock + p->value > nc ) ||
-				( p->clock > nc && p->clock < nc + dur );
-			if( !conflict ) continue;
+			bool in_set = false;
+			for( auto& e : g_ed.move_set ) if( e.oc == p->clock ){ in_set = true; break; }
+			if( in_set ) continue;
 			int k = g_ed.pxtn->evels->get_Value( p->clock, (uint8_t)p->unit_no, EVENTKIND_KEY ) >> 8;
+			bool conflict =
+				( p->clock < p->clock + dc && p->clock + p->value > p->clock + dc ) ||
+				false;
+			// simple span check per moved note
+			for( auto& e : g_ed.move_set )
+			{
+				int32_t nc = e.oc + dc;
+				if( ( p->clock < nc && p->clock + p->value > nc ) ||
+				    ( p->clock > nc && p->clock < nc + e.dur ) ) conflict = true;
+			}
+			if( !conflict ) continue;
 			double y = ( _ROW_MAX - MIN( MAX( k, _ROW_MIN ), _ROW_MAX ) ) * _ROW_H - g_ed.v_offset;
 			double x0 = p->clock * g_ed.px_per_clock - g_ed.h_offset;
 			double x1 = ( p->clock + p->value ) * g_ed.px_per_clock - g_ed.h_offset;
@@ -1351,6 +1365,29 @@ static void _draw_cb( GtkDrawingArea*, cairo_t* cr, int w, int h, gpointer )
 			cairo_set_line_width( cr, 2 );
 			cairo_rectangle( cr, x0, y + 1, x1 - x0, _ROW_H - 2 ); cairo_stroke( cr );
 			cairo_set_line_width( cr, 1.0 );
+		}
+
+		// ghosts
+		for( auto& e : g_ed.move_set )
+		{
+			double r2, g2, b2; _unit_color( g_ed.drag_unit, &r2, &g2, &b2 );
+			double gx = ( e.oc + dc ) * g_ed.px_per_clock - g_ed.h_offset;
+			double gy = ( _ROW_MAX - MIN( MAX( e.key + dr, _ROW_MIN ), _ROW_MAX ) ) * _ROW_H - g_ed.v_offset;
+			double gw = MAX( 4.0, e.dur * g_ed.px_per_clock );
+			cairo_set_source_rgba( cr, r2, g2, b2, 0.55 );
+			cairo_rectangle( cr, gx, gy + 1, gw, _ROW_H - 2 ); cairo_fill( cr );
+			cairo_set_source_rgb( cr, 1, 1, 1 );
+			cairo_rectangle( cr, gx, gy + 1, gw, _ROW_H - 2 ); cairo_stroke( cr );
+
+			// dashed outline at the source position
+			double sx = e.oc * g_ed.px_per_clock - g_ed.h_offset;
+			double sy = ( _ROW_MAX - MIN( MAX( e.key, _ROW_MIN ), _ROW_MAX ) ) * _ROW_H - g_ed.v_offset;
+			cairo_set_source_rgba( cr, 1, 1, 1, 0.45 );
+			static const double dash[2] = { 5, 5 };
+			cairo_set_dash( cr, dash, 2, 0 );
+			cairo_rectangle( cr, sx, sy + 1, MAX(4.0, e.dur * g_ed.px_per_clock), _ROW_H - 2 );
+			cairo_stroke( cr );
+			cairo_set_dash( cr, NULL, 0, 0 );
 		}
 	}
 
@@ -1508,6 +1545,22 @@ static void _on_drag_begin( GtkGestureDrag* gesture, double x, double y, gpointe
 	if( hit )
 	{
 		_push_undo();
+
+		// capture the move set: the grabbed note, or every selected note
+		g_ed.move_set.clear();
+		auto selset = _selected_notes( unit ); // includes the grabbed note itself
+		if( selset.size() > 1 )
+			for( auto& t : selset )
+			{
+				int32_t dur = g_ed.snap;
+				for( const EVERECORD* q = g_ed.pxtn->evels->get_Records(); q; q = q->next )
+					if( q->kind == EVENTKIND_ON && q->unit_no == unit && q->clock == t.first )
+						{ dur = q->value > 0 ? q->value : g_ed.snap; break; }
+				g_ed.move_set.push_back( { t.first, t.second, dur } );
+			}
+		int hk = g_ed.pxtn->evels->get_Value( hit->clock, (uint8_t)unit, EVENTKIND_KEY ) >> 8;
+		g_ed.move_set.push_back( { hit->clock, hk, hit->value > 0 ? hit->value : g_ed.snap } );
+
 		double end_x = ( hit->clock + hit->value ) * g_ed.px_per_clock - g_ed.h_offset;
 		// right edge = resize, but only for notes wide enough to click precisely
 		double note_w = hit->value * g_ed.px_per_clock;
@@ -1516,8 +1569,8 @@ static void _on_drag_begin( GtkGestureDrag* gesture, double x, double y, gpointe
 		g_ed.drag_unit     = unit;
 		g_ed.drag_orig_clk = hit->clock;
 		g_ed.drag_orig_row = row;
-		g_ed.drag_cur_clk  = hit->clock;
-		g_ed.drag_cur_row  = row;
+		g_ed.drag_cur_clk  = 0; // delta
+		g_ed.drag_cur_row  = 0; // delta
 		g_ed.drag_dur      = hit->value > 0 ? hit->value : g_ed.snap;
 		g_ed.drag_key      = g_ed.pxtn->evels->get_Value( hit->clock, (uint8_t)unit, EVENTKIND_KEY ) >> 8;
 		g_ed.has_sel       = true;
@@ -1540,18 +1593,32 @@ static void _on_drag_update( GtkGestureDrag* gesture, double, double, gpointer )
 
 static void _apply_move()
 {
-	// move the note from its original position to the ghost position
+	// apply the ghost transform to every note of the move set
 	pxtnEvelist* ev = g_ed.pxtn->evels;
-	int32_t oc = g_ed.drag_orig_clk, nc = g_ed.drag_cur_clk;
+	int32_t dc = g_ed.drag_cur_clk;
+	int32_t dr = g_ed.drag_cur_row;
+
 	SDL_LockAudio();
-	ev->Record_Delete( oc, oc + 1, (uint8_t)g_ed.drag_unit, EVENTKIND_ON );
-	if( ev->get_Value( nc, (uint8_t)g_ed.drag_unit, EVENTKIND_KEY ) != ( g_ed.drag_key << 8 ) )
+	std::vector<int32_t> ocs;
+	for( auto& e : g_ed.move_set ) ocs.push_back( e.oc );
+	for( int32_t oc : ocs )
+		ev->Record_Delete( oc, oc + 1, (uint8_t)g_ed.drag_unit, EVENTKIND_ON );
+
+	struct Ins { int32_t clock; int32_t dur; };
+	std::vector<Ins> ins;
+	for( auto& e : g_ed.move_set )
 	{
+		int32_t nc = e.oc + dc;
+		int32_t nk = ( e.key + dr ) << 8;
 		ev->Record_Delete( nc, nc + 1, (uint8_t)g_ed.drag_unit, EVENTKIND_KEY );
-		ev->Record_Add_i( nc, (uint8_t)g_ed.drag_unit, EVENTKIND_KEY, g_ed.drag_key << 8 );
+		ev->Record_Add_i( nc, (uint8_t)g_ed.drag_unit, EVENTKIND_KEY, nk );
+		ev->Record_Add_i( nc, (uint8_t)g_ed.drag_unit, EVENTKIND_ON, e.dur );
+		ins.push_back( { nc, e.dur } );
 	}
-	ev->Record_Add_i( nc, (uint8_t)g_ed.drag_unit, EVENTKIND_ON, g_ed.drag_dur );
-	_fix_overlaps( nc, g_ed.drag_unit, g_ed.drag_dur );
+	SDL_UnlockAudio();
+
+	SDL_LockAudio();
+	for( auto& t : ins ) _fix_overlaps( t.clock, g_ed.drag_unit, t.dur );
 	SDL_UnlockAudio();
 }
 
