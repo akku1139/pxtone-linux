@@ -94,6 +94,7 @@ struct Editor
 
 	// range selection (shift-drag)
 	bool    has_range = false;
+	bool     range_rect_visible = false;
 	int32_t rg_c0 = 0, rg_c1 = 0;
 	int     rg_r0 = 0, rg_r1 = 0;
 
@@ -924,7 +925,7 @@ static void _units_refresh()
 		gtk_box_append( GTK_BOX( row ), lbl );
 
 		GtkWidget* use = gtk_check_button_new_with_label( "audible" );
-		gtk_toggle_button_set_active( GTK_TOGGLE_BUTTON( use ), g_ed.pxtn->Unit_Get( i )->get_played() );
+		gtk_check_button_set_active( GTK_CHECK_BUTTON( use ), g_ed.pxtn->Unit_Get( i )->get_played() );
 		g_object_set_data( G_OBJECT( use ), "uidx", GINT_TO_POINTER( i ) );
 		g_signal_connect( use, "toggled", G_CALLBACK( +[]( GtkToggleButton* b, gpointer ){
 			int i = GPOINTER_TO_INT( g_object_get_data( G_OBJECT( b ), "uidx" ) );
@@ -1432,7 +1433,7 @@ static void _draw_cb( GtkDrawingArea*, cairo_t* cr, int w, int h, gpointer )
 	}
 
 	// range rectangle
-	if( g_ed.has_range || g_ed.mode == DRAG_RANGE )
+	if( g_ed.range_rect_visible || g_ed.mode == DRAG_RANGE )
 	{
 		int32_t ca = MIN( g_ed.rg_c0, g_ed.rg_c1 ), cb = MAX( g_ed.rg_c0, g_ed.rg_c1 );
 		int    ra = MIN( g_ed.rg_r0, g_ed.rg_r1 ), rb = MAX( g_ed.rg_r0, g_ed.rg_r1 );
@@ -1530,6 +1531,7 @@ static void _on_drag_begin( GtkGestureDrag* gesture, double x, double y, gpointe
 		{
 			g_ed.mode      = DRAG_RANGE;
 			g_ed.dragging  = true;
+			g_ed.range_rect_visible = true;
 			g_ed.rg_c0 = g_ed.rg_c1 = clock;
 			g_ed.rg_r0 = g_ed.rg_r1 = row;
 			g_ed.sel_unit  = unit;
@@ -1634,6 +1636,7 @@ static void _finish_drag()
 	}
 	if( g_ed.mode == DRAG_RANGE )
 	{
+		g_ed.range_rect_visible = false; // confirmed: hide rect, show outlines
 		g_ed.rg_c0 = MIN( g_ed.rg_c0, g_ed.rg_c1 );
 		g_ed.rg_c1 = MAX( g_ed.rg_c0, g_ed.rg_c1 );
 		g_ed.has_range = true;
