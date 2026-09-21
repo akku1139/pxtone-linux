@@ -27,7 +27,31 @@ pxtnWoice::~pxtnWoice()
 int32_t       pxtnWoice::get_voice_num    () const{ return _voice_num    ; }
 int32_t       pxtnWoice::get_x3x_basic_key() const{ return _x3x_basic_key; }
 float         pxtnWoice::get_x3x_tuning   () const{ return _x3x_tuning   ; }
-pxtnWOICETYPE pxtnWoice::get_type         () const{ return _type         ; }
+pxtnWOICETYPE pxtnWoice::get_type         () const
+{
+	if( _type != pxtnWOICE_None ) return _type;
+	if( !_voices || _voice_num <= 0 ) return pxtnWOICE_None;
+
+	/*
+	 * Programmatically-created voices do not go through read(), so _type
+	 * has not necessarily been initialized to the material type yet.
+	 * Infer it from the voice representation as a serialization fallback.
+	 */
+	switch( _voices[ 0 ].type )
+	{
+	case pxtnVOICE_Coodinate:
+	case pxtnVOICE_Overtone:
+		return pxtnWOICE_PTV;
+	case pxtnVOICE_Noise:
+		return pxtnWOICE_PTN;
+	case pxtnVOICE_Sampling:
+		return pxtnWOICE_PCM;
+	case pxtnVOICE_OggVorbis:
+		return pxtnWOICE_OGGV;
+	default:
+		return pxtnWOICE_None;
+	}
+}
 
 
 pxtnVOICEUNIT *pxtnWoice::get_voice_variable( int32_t idx )
