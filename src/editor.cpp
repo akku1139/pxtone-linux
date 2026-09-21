@@ -593,57 +593,143 @@ static void _stop_play()
 
 // ---- preview ---------------------------------------------------------------
 
-static void _preview_woice( const pxtnWoice* woice, int row, int dur_frames_arg )
+static void _preview_woice( const pxtnWoice*, int, int )
 {
-	if( !woice ) return;
-	const int32_t SPSEC = _SAMPLE_PER_SECOND;
-	const int dur_frames = dur_frames_arg > 0 ? dur_frames_arg : SPSEC * 35 / 100;
-	std::vector<float> acc( dur_frames * 2, 0.0f );
-
-	for( int v = 0; v < woice->get_voice_num(); v++ )
-	{
-		const pxtnVOICEINSTANCE* vi = woice->get_instance( v );
-		const pxtnVOICEUNIT*     vc = woice->get_voice( v );
-		if( !vi || !vi->p_smp_w || vi->smp_body_w <= 0 ) continue;
-
-		double ratio = pow( 2.0, ( row - ( vc->basic_key >> 8 ) ) / 12.0 );
-		double vol   = vc->volume / 128.0;
-		const int16_t* p = (const int16_t*)vi->p_smp_w;
-
-		for( int i = 0; i < dur_frames; i++ )
-		{
-			int64_t si = (int64_t)( i * ratio ) % vi->smp_body_w;
-			double env = 1.0;
-			if( i < SPSEC * 3 / 1000 ) env = i / (double)( SPSEC * 3 / 1000 );
-			if( i > dur_frames - SPSEC / 10 ) env = ( dur_frames - i ) / (double)( SPSEC / 10 );
-			acc[ i * 2 + 0 ] += p[ si * 2 + 0 ] / 32768.0f * vol * env;
-			acc[ i * 2 + 1 ] += p[ si * 2 + 1 ] / 32768.0f * vol * env;
-		}
-	}
-
-	size_t capf = g_ed.pv_buf.size() / _CHANNEL_NUM;
-	if( capf == 0 ) return;
-	for( int i = 0; i < dur_frames; i++ )
-	{
-		uint64_t wr = g_ed.pv_write;
-		if( wr - g_ed.pv_read >= capf ) g_ed.pv_read = wr - capf + 1;
-		double l = acc[ i * 2 + 0 ] * 0.6, r = acc[ i * 2 + 1 ] * 0.6;
-		if( l >  1 ) l =  1; if( l < -1 ) l = -1;
-		if( r >  1 ) r =  1; if( r < -1 ) r = -1;
-		g_ed.pv_buf[ ( wr % capf ) * 2 + 0 ] = (int16_t)( l * 32767 );
-		g_ed.pv_buf[ ( wr % capf ) * 2 + 1 ] = (int16_t)( r * 32767 );
-		g_ed.pv_write = wr + 1;
-	}
+	/*
+	 * Preview rendering is intentionally implemented by _preview_note().
+	 * Keeping a second sample renderer here caused preview and normal
+	 * playback to disagree on envelope, volume, tuning, looping, etc.
+	 */
 }
 
 static void _preview_note( int unit, int row, int32_t clock, int dur_frames )
 {
+	if( !g_ed.loaded || !g_ed.pxtn ) return;
 	if( unit < 0 || unit >= g_ed.unit_num ) return;
-	int32_t vno = g_ed.pxtn->evels->get_Value( clock, (uint8_t)unit, EVENTKIND_VOICENO );
-	const pxtnWoice* woice = NULL;
-	if( vno >= 0 && vno < g_ed.pxtn->Woice_Num() ) woice = g_ed.pxtn->Woice_Get( vno );
-	if( !woice && g_ed.pxtn->Woice_Num() > 0 ) woice = g_ed.pxtn->Woice_Get( 0 );
-	_preview_woice( woice, row, dur_frames );
+
+	const double spc = _samples_per_clock();
+	const int32_t note_clock = g_ed.snap > 0 ? g_ed.snap : _BEAT_CLOCK / 2;
+	const int32_t render_frames =
+		dur_frames > 0 ? dur_frames :
+		MAX( 1, (int32_t)ceil( note_clock * spc ) );
+
+	/*
+	 * moo_preparation() mutates the service's playback state.  Never run it
+	 * on g_ed.pxtn here: doing so would interrupt/corrupt normal playback.
+	 *
+	 * Serialize the current project and render it through an independent
+	 * pxtnService instead.  This deliberately uses the same pxtn engine as
+	 * normal playback rather than maintaining a second preview renderer.
+	 */
+	FILE* fp = tmpfile();
+	if( !fp ) return;
+
+	pxtnERR err = g_ed.pxtn->write( fp, false, 0x0500 );
+	if( err != pxtnOK )
+	{
+		fclose( fp );
+		return;
+	}
+	if( fseek( fp, 0, SEEK_SET ) != 0 )
+	{
+		fclose( fp );
+		return;
+	}
+
+	pxtnService* preview = new pxtnService( _pxtn_r, _pxtn_w, _pxtn_s, _pxtn_p );
+	if( preview->init() != pxtnOK ||
+		!preview->set_destination_quality( _CHANNEL_NUM, _SAMPLE_PER_SECOND ) )
+	{
+		delete preview;
+		fclose( fp );
+		return;
+	}
+
+	err = preview->read( fp );
+	fclose( fp );
+	if( err != pxtnOK )
+	{
+		delete preview;
+		return;
+	}
+
+	err = preview->tones_ready();
+	if( err != pxtnOK )
+	{
+		delete preview;
+		return;
+	}
+
+	/*
+	 * The copied project contains all units and all events.  Mute every
+	 * other unit so that previewing a note does not reproduce the rest of
+	 * the song.
+	 */
+	for( int u = 0; u < preview->Unit_Num(); u++ )
+		preview->Unit_Get_variable( u )->set_played( u == unit );
+
+	/*
+	 * Remove all ON events from the preview copy.  KEY/volume/velocity/
+	 * tuning/etc. events are retained so the target note inherits exactly
+	 * the state that exists at its insertion point.
+	 *
+	 * The newly inserted note already exists in g_ed.pxtn because
+	 * _preview_note() is called after _add_note() records EVENTKIND_ON.
+	 */
+	preview->evels->Record_Delete( 0, INT32_MAX,
+		(uint8_t)unit, EVENTKIND_ON );
+	preview->evels->Record_Add_i( clock, (uint8_t)unit,
+		EVENTKIND_ON, note_clock );
+
+	/*
+	 * Render starting at the note position.  Moo walks the event list from
+	 * the beginning and applies all state events <= clock before generating
+	 * the first sample, so the note gets the same VOICENO, KEY, velocity,
+	 * volume, tuning, pan, etc. as normal playback.
+	 */
+	pxtnVOMITPREPARATION prep = {0};
+	prep.flags            = pxtnVOMITPREPFLAG_unit_mute;
+	prep.start_pos_sample = (int32_t)llround( clock * spc );
+	prep.master_volume    = 0.80f;
+
+	if( !preview->moo_preparation( &prep ) )
+	{
+		delete preview;
+		return;
+	}
+
+	const size_t bytes_per_frame = _CHANNEL_NUM * sizeof(int16_t);
+	const int chunk_frames = 1024;
+	std::vector<int16_t> pcm( chunk_frames * _CHANNEL_NUM );
+
+	size_t capf = g_ed.pv_buf.size() / _CHANNEL_NUM;
+	if( capf == 0 )
+	{
+		delete preview;
+		return;
+	}
+
+	int remaining = render_frames;
+	while( remaining > 0 && !preview->moo_is_end_vomit() )
+	{
+		int frames = MIN( remaining, chunk_frames );
+		if( !preview->Moo( pcm.data(), frames * bytes_per_frame ) ) break;
+
+		for( int i = 0; i < frames; i++ )
+		{
+			uint64_t wr = g_ed.pv_write;
+			if( wr - g_ed.pv_read >= capf )
+				g_ed.pv_read = wr - capf + 1;
+
+			g_ed.pv_buf[ ( wr % capf ) * _CHANNEL_NUM + 0 ] = pcm[ i * _CHANNEL_NUM + 0 ];
+			g_ed.pv_buf[ ( wr % capf ) * _CHANNEL_NUM + 1 ] = pcm[ i * _CHANNEL_NUM + 1 ];
+			g_ed.pv_write = wr + 1;
+		}
+
+		remaining -= frames;
+	}
+
+	delete preview;
 }
 
 // ---- load / new / open / save ----------------------------------------------
@@ -878,7 +964,8 @@ static void _add_note( int32_t clock, int row )
 	g_ed.pxtn->evels->Record_Add_i( c, (uint8_t)unit, EVENTKIND_ON, g_ed.snap );
 	SDL_UnlockAudio();
 
-	_preview_note( unit, row, c );
+	_preview_note( unit, row, c,
+		MAX( 1, (int32_t)ceil( g_ed.snap * _samples_per_clock() ) ) );
 	_units_refresh();
 
 	g_ed.dragging   = true;
