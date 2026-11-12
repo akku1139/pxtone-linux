@@ -196,6 +196,8 @@ pxtnERR pxtnPulse_Oggv::Decode( pxtnPulse_PCM * p_pcm ) const
     oc.close_func = _mclose_dummy;
     oc.tell_func  = _mtell       ;
   
+    char    pcmout[ 4096 ] = {0}; //take 4k out of the data segment, not the stack
+
     switch( ov_open_callbacks( &ovmem, &vf, NULL, 0, oc ) )
 	{
 	case OV_EREAD     : res = pxtnERR_ogg; goto term; //{printf("A read from media returned an error.\n");exit(1);} 
@@ -209,7 +211,6 @@ pxtnERR pxtnPulse_Oggv::Decode( pxtnPulse_PCM * p_pcm ) const
     vi    = ov_info( &vf,-1 );
 	
 	int32_t current_section;
-	char    pcmout[ 4096 ] = {0}; //take 4k out of the data segment, not the stack
 	{
 		int32_t smp_num = (int32_t)ov_pcm_total( &vf, -1 );
 		uint32_t bytes;
